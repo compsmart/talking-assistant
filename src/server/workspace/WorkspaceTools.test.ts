@@ -38,7 +38,7 @@ describe('WorkspaceTools boundary', () => {
 
   it('enforces dependency and media restrictions before tool execution', async () => {
     const tools = subject();
-    const policy = { dependencies: 'existing-only', mediaGeneration: false, validation: 'standard', reasoningProfile: 'adaptive' } as const;
+    const policy = { dependencies: 'existing-only', mediaGeneration: false, validation: 'standard', reasoningProfile: 'adaptive', maxParallelAgents: 3 } as const;
     await expect(tools.execute('test', 'install_dependencies', {}, () => false, policy)).rejects.toThrow(/dependencies is disabled/i);
     await expect(tools.execute('test', 'generate_image', {}, () => false, policy)).rejects.toThrow(/Media generation is disabled/);
   });
@@ -47,14 +47,30 @@ describe('WorkspaceTools boundary', () => {
     const context = { id: 'test', name: 'Test', draftDir: config.draftDir }; const activity = { emit: vi.fn().mockResolvedValue(undefined) };
     const images = { removeBackground: vi.fn().mockResolvedValue({ path: 'assets/processed/backgrounds/a.webp' }), extractRegions: vi.fn() };
     const tools = new WorkspaceTools({} as any, activity as any, { active: () => context, get: () => context } as any, undefined, images as any);
-    const policy = { dependencies: 'existing-only', mediaGeneration: false, validation: 'standard', reasoningProfile: 'adaptive' } as const;
+    const policy = { dependencies: 'existing-only', mediaGeneration: false, validation: 'standard', reasoningProfile: 'adaptive', maxParallelAgents: 3 } as const;
     await expect(tools.execute('test', 'remove_image_background', { sourcePath: 'uploads/a.png', name: 'a' }, () => false, policy)).resolves.toMatchObject({ path: expect.stringContaining('processed') });
     expect(images.removeBackground).toHaveBeenCalledOnce();
   });
 
   it('blocks verification commands in fast validation mode', async () => {
-    const policy = { dependencies: 'allow', mediaGeneration: true, validation: 'fast', reasoningProfile: 'adaptive' } as const;
+    const policy = { dependencies: 'allow', mediaGeneration: true, validation: 'fast', reasoningProfile: 'adaptive', maxParallelAgents: 3 } as const;
     await expect(subject().execute('test', 'run_command', { command: 'npm test' }, () => false, policy)).rejects.toThrow(/skips coding-agent verification/);
+  });
+
+  it('runs bounded utility operations without workspace mutation', async () => {
+    await expect(subject().execute('test', 'calculate', { expression: '2 * (3 + 4)^2' })).resolves.toEqual({ value: 98 });
+    await expect(subject().execute('test', 'calculate', { expression: 'process.exit()' })).rejects.toThrow(/unsupported/);
+    await expect(subject().execute('test', 'content.hash', { content: 'hello', algorithm: 'sha256' })).resolves.toMatchObject({ algorithm: 'sha256', digest: '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824' });
+    await expect(subject().execute('test', 'regex.test', { pattern: '^hel+', input: 'hello' })).resolves.toMatchObject({ matched: true, index: 0 });
+  });
+
+  it('redacts disclosed credentials from persisted tool activity', async () => {
+    const secret = 'sentinel-secret-value'; const activity = { emit: vi.fn().mockResolvedValue(undefined) };
+    const context = { id: 'test', name: 'Test', draftDir: config.draftDir };
+    const tools = new WorkspaceTools({} as any, activity as any, { active: () => context, get: () => context } as any);
+    await tools.execute('test', 'search_files', { query: secret, path: '.' }, () => false, undefined, [], 'coding', [secret]);
+    expect(JSON.stringify(activity.emit.mock.calls)).not.toContain(secret);
+    expect(JSON.stringify(activity.emit.mock.calls)).toContain('[REDACTED]');
   });
 
   it('batches reads and prevalidates atomic edits before mutating files', async () => {

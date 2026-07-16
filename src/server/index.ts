@@ -14,7 +14,7 @@ import { PlanningAgent } from './agent/PlanningAgent.js';
 import { PlanManager } from './agent/PlanManager.js';
 import { PlanStore } from './agent/PlanStore.js';
 import { LiveProxy } from './live/LiveProxy.js';
-import type { TaskRequest, WorkspaceMode } from '../shared/protocol.js';
+import type { AgentStage, RoutingSimulation, TaskRequest, WorkRequest, WorkUpdateMode, WorkspaceMode } from '../shared/protocol.js';
 import { AssetService } from './workspace/AssetService.js';
 import { WorkspaceFiles } from './workspace/WorkspaceFiles.js';
 import { WorkspaceGit } from './workspace/WorkspaceGit.js';
@@ -23,11 +23,21 @@ import { WorkspaceChangeService } from './workspace/WorkspaceChangeService.js';
 import { UploadService } from './workspace/UploadService.js';
 import { WorkspaceSettingsService } from './workspace/WorkspaceSettingsService.js';
 import { AssistantSettingsService } from './assistant/AssistantSettingsService.js';
+import { UiThemeService } from './assistant/UiThemeService.js';
 import { WorkspaceRegistry, type WorkspaceContext } from './workspace/WorkspaceRegistry.js';
 import { WorkspaceReferenceGrants } from './workspace/WorkspaceReferenceGrants.js';
 import { ImageProcessingService } from './workspace/ImageProcessingService.js';
 import { MediaJobManager } from './media/MediaJobManager.js';
 import type { MediaJobRequest, MediaStageName } from '../shared/protocol.js';
+import { WorkStore } from './orchestration/WorkStore.js';
+import { WorkOrchestrator } from './orchestration/WorkOrchestrator.js';
+import { GitWorktreeService } from './orchestration/GitWorktreeService.js';
+import { ConcurrentCodingRunner } from './orchestration/ConcurrentCodingRunner.js';
+import { AssistantCoordinator } from './orchestration/AssistantCoordinator.js';
+import { AgentConfigService } from './agents/AgentConfigService.js';
+import { SecretVault } from './agents/SecretVault.js';
+import { ToolCatalog } from './agents/ToolCatalog.js';
+import { AgentRouter, type RoutableAgentProfile } from './orchestration/AgentRouter.js';
 
 const activity = new ActivityHub();
 const registry = new WorkspaceRegistry();
@@ -44,6 +54,10 @@ const mediaJobs = new MediaJobManager(registry, activity, lock, async (taskId, w
   return workspace.publish(taskId, { mode: settings.get(workspaceId).mode });
 });
 const assistantSettings = new AssistantSettingsService();
+const uiThemes = new UiThemeService();
+const secretVault = await SecretVault.system().catch(() => undefined);
+const agentConfig = new AgentConfigService(undefined, secretVault);
+const agentTools = new ToolCatalog();
 const grants = new WorkspaceReferenceGrants(registry);
 const tools = new WorkspaceTools(workspace, activity, registry, assets, imageProcessing, mediaJobs);
 const changes = new WorkspaceChangeService(workspace, tools, files, lock, settings, activity);
@@ -52,6 +66,11 @@ const planStore = new PlanStore(registry);
 const tasks = new TaskManager(codingAgent, tools, workspace, activity, lock, settings, grants, registry, planStore);
 const planningAgent = new PlanningAgent(tools, activity);
 const plans = new PlanManager(planningAgent, planStore, tools, activity, lock, settings, grants, registry);
+const workStore = new WorkStore(config.orchestrationDb);
+const gitWorktrees = new GitWorktreeService(registry, workspace, lock);
+const concurrentRunner = new ConcurrentCodingRunner(gitWorktrees, tools, workspace, settings, activity);
+const assistantCoordinator = new AssistantCoordinator(agentConfig);
+const orchestrator = new WorkOrchestrator(workStore, tasks, plans, planStore, activity, grants, registry, settings, concurrentRunner, assistantCoordinator);
 const live = new LiveProxy();
 const serverStartedAt = new Date().toISOString();
 
@@ -84,10 +103,44 @@ app.get('/api/workspace/settings', (_request, response) => response.json(setting
 app.put('/api/workspace/settings', (request, response) => route(response, () => settings.update(request.body)));
 app.get('/api/assistant/profile', (_request, response) => route(response, () => assistantSettings.getProfile()));
 app.put('/api/assistant/profile', (request, response) => route(response, () => assistantSettings.updateProfile(request)));
+app.get('/api/ui/profile', (_request, response) => response.json(uiThemes.get()));
+app.put('/api/ui/profile', (request, response) => route(response, () => uiThemes.update(request.body)));
 app.get('/api/assistant/photo', async (_request, response) => {
   try { response.setHeader('cache-control', 'no-store'); response.type('image/webp').send(await assistantSettings.getPhoto()); }
   catch { response.status(404).json({ error: 'No assistant portrait is configured.' }); }
 });
+app.get('/api/agent-config', (_request, response) => response.json(agentConfig.get()));
+app.get('/api/agent-tools', (_request, response) => response.json(agentTools.list()));
+app.get('/api/agents/tools', (_request, response) => response.json(agentTools.directory()));
+app.put('/api/agent-config', (request, response) => route(response, async () => {
+  const current = agentConfig.get();
+  const next = {
+    ...current,
+    profiles: request.body?.profiles ?? current.profiles,
+    overrides: request.body?.workspaceOverrides ?? request.body?.overrides ?? current.overrides,
+    skills: request.body?.skills ?? current.skills,
+    contexts: request.body?.contexts ?? current.contexts,
+    routing: request.body?.routing ?? current.routing,
+  };
+  const saved = await agentConfig.replace(next, Number(request.body?.expectedRevision)); orchestrator.kick(); return saved;
+}));
+app.post('/api/agent-routing/simulate', (request, response) => route(response, async () => simulateRouting(request.body)));
+app.post('/api/agent-secrets', (request, response) => route(response, async () => {
+  const current = agentConfig.get(); const scope = request.body?.scope === 'workspace' ? 'workspace' : 'global';
+  const saved = await agentConfig.createSecret({
+    name: request.body?.name, kind: request.body?.kind, scope, ...(scope === 'workspace' ? { workspaceId: registry.active().id } : {}),
+    exposure: request.body?.exposure || 'tool_only', toolIds: Array.isArray(request.body?.toolIds) ? request.body.toolIds.map(String) : [], agentIds: Array.isArray(request.body?.agentIds) ? request.body.agentIds.map(String) : [],
+  }, String(request.body?.value || ''), current.revision);
+  orchestrator.kick(); return saved.secrets.at(-1)!;
+}));
+app.put('/api/agent-secrets/:id', (request, response) => route(response, async () => {
+  let current = agentConfig.get(); const existing = current.secrets.find((item) => item.id === request.params.id); if (!existing) throw statusError('Secret not found.', 404);
+  if (request.body?.value) await agentConfig.replaceSecret(existing.id, String(request.body.value));
+  const updated = { ...existing, ...(request.body?.name !== undefined ? { name: String(request.body.name) } : {}), ...(request.body?.exposure !== undefined ? { exposure: request.body.exposure } : {}), ...(Array.isArray(request.body?.grants) ? { agentIds: request.body.grants.map(String) } : {}), ...(Array.isArray(request.body?.agentIds) ? { agentIds: request.body.agentIds.map(String) } : {}), ...(Array.isArray(request.body?.toolIds) ? { toolIds: request.body.toolIds.map(String) } : {}), updatedAt: new Date().toISOString() };
+  current = await agentConfig.replace({ ...current, secrets: current.secrets.map((item) => item.id === existing.id ? updated : item) }, current.revision); orchestrator.kick();
+  return current.secrets.find((item) => item.id === existing.id)!;
+}));
+app.delete('/api/agent-secrets/:id', (request, response) => route(response, async () => { const saved = await agentConfig.deleteSecret(request.params.id, agentConfig.get().revision); orchestrator.kick(); return { ok: true, revision: saved.revision }; }));
 app.get('/api/workspace/files', async (request, response) => route(response, async () => files.list(String(request.query.path || '.'), undefined, request.query.optional === '1')));
 app.get('/api/workspace/files/read', async (request, response) => route(response, async () => files.readText(String(request.query.path || ''))));
 app.get('/api/workspace/files/raw', async (request, response) => {
@@ -114,7 +167,7 @@ app.post('/api/workspace/assets/images', async (request, response) => route(resp
   const prompt = String(request.body?.prompt || '').trim(); const name = String(request.body?.name || '').trim();
   if (!prompt) throw statusError('An image prompt is required.', 400);
   if (!name) throw statusError('An image name is required.', 400);
-  return changes.transaction('a Canvas image generation', () => tools.execute(`canvas-${randomUUID()}`, 'generate_image', {
+  return changes.transaction('an image asset generation', () => tools.execute(`image-asset-${randomUUID()}`, 'generate_image', {
     prompt, name, transparent: request.body?.transparent === true,
     referenceImages: Array.isArray(request.body?.referenceImages) ? request.body.referenceImages.map(String) : [],
     aspectRatio: request.body?.aspectRatio,
@@ -133,7 +186,10 @@ app.get('/api/media-jobs/:id/artifacts/:artifactId', async (request, response) =
   catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); }
 });
 app.get('/api/workspace/git/status', async (_request, response) => route(response, () => git.status()));
-app.post('/api/workspace/git/commit', async (_request, response) => route(response, () => lock.run('a workspace commit', () => git.commit())));
+app.post('/api/workspace/git/commit', async (request, response) => route(response, () => lock.run('a workspace commit', () => {
+  const actions = Array.isArray(request.body?.actions) ? request.body.actions.map(String) : [];
+  return git.commit(undefined, actions);
+})));
 app.get('/api/workspace/snapshot', async (_request, response) => {
   try {
     const data = await workspace.captureCurrentCanvas(true);
@@ -158,6 +214,25 @@ app.post('/api/workspace/selection-snapshot', async (request, response) => {
 });
 app.get('/api/tasks/active', (_request, response) => response.json(tasks.getActive() || null));
 app.get('/api/agent-runs/active', (_request, response) => response.json(plans.getActive() || tasks.getActive() || null));
+app.get('/api/work', (request, response) => route(response, async () => orchestrator.list(stringQuery(request.query.workspaceId))));
+app.get('/api/work/:id', (request, response) => { const work = orchestrator.get(request.params.id); response.status(work ? 200 : 404).json(work || { error: 'Work item not found.' }); });
+app.post('/api/work', (request, response) => {
+  try { response.status(202).json(orchestrator.submit(request.body as WorkRequest)); }
+  catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); }
+});
+app.patch('/api/work/:id', (request, response) => {
+  try { response.json(orchestrator.update(request.params.id, request.body?.change || request.body, String(request.body?.mode || 'append') as WorkUpdateMode, request.body?.expectedRevision ? Number(request.body.expectedRevision) : undefined)); }
+  catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); }
+});
+app.post('/api/work/:id/cancel', (request, response) => {
+  try { response.status(202).json(orchestrator.cancel(request.params.id)); }
+  catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); }
+});
+app.post('/api/work/:id/questions/:questionId/answer', (request, response) => {
+  try { response.json(orchestrator.answer(request.params.id, request.params.questionId, String(request.body?.answer || ''))); }
+  catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); }
+});
+app.post('/api/work/:id/plan/approve', (request, response) => route(response, () => orchestrator.approvePlan(request.params.id, String(request.body?.path || ''), request.body?.hash ? String(request.body.hash) : undefined)));
 app.get('/api/activity', (request, response) => response.json(activity.list({
   workspaceId: registry.active().id, all: request.query.scope === 'all', severity: stringQuery(request.query.severity), source: stringQuery(request.query.source),
   query: stringQuery(request.query.q), cursor: stringQuery(request.query.cursor), limit: Number(request.query.limit) || undefined,
@@ -184,7 +259,11 @@ app.post('/api/activity/client', (request, response) => {
 });
 app.get('/api/activity/state', (_request, response) => route(response, async () => ({
   workspaceId: registry.active().id, workspaceVersion: workspace.version, lockOwner: lock.currentOwner || undefined,
-  activeRun: plans.getActive() || tasks.getActive() || undefined, serverStartedAt, restartRequired: await sourceChangedSinceStart(), restartCommand: 'npm start', git: await git.status(),
+  activeRun: plans.getActive() || tasks.getActive() || undefined,
+  activeRuns: orchestrator.list().filter((work) => !['completed', 'failed', 'cancelled', 'superseded'].includes(work.status)),
+  queueDepth: orchestrator.list().filter((work) => work.status === 'queued').length,
+  workerCapacity: { active: orchestrator.list().filter((work) => ['coordinating', 'planning', 'running', 'integrating', 'validating', 'publishing'].includes(work.status)).length, maximum: settings.get().codingAgent.maxParallelAgents },
+  integrationOwner: lock.currentOwner || undefined, serverStartedAt, restartRequired: await sourceChangedSinceStart(), restartCommand: 'npm start', git: await git.status(),
 })));
 app.get('/api/workspace/releases', (_request, response) => route(response, () => workspace.listReleases()));
 app.post('/api/recovery/preview/restart', (request, response) => route(response, () => recoveryOperation('a preview restart', (id) => workspace.restartPreview(id, settings.get().mode))));
@@ -233,6 +312,13 @@ app.use((_request, response) => response.sendFile(resolve(clientDist, 'index.htm
 
 const server = http.createServer(app);
 const activityServer = new WebSocketServer({ noServer: true });
+const workServer = new WebSocketServer({ noServer: true });
+workServer.on('connection', (socket, request) => {
+  const parameters = new URL(request.url || '/', 'http://localhost').searchParams;
+  const workspaceId = parameters.get('workspaceId') || safeWorkspaceId();
+  if (!workspaceId) { socket.close(1008, 'workspaceId required'); return; }
+  orchestrator.attach(socket, workspaceId);
+});
 activityServer.on('connection', (socket, request) => {
   const parameters = new URL(request.url || '/', 'http://localhost').searchParams;
   if (parameters.get('scope') === 'feed') { activity.attachFeed(socket); return; }
@@ -244,21 +330,58 @@ server.on('upgrade', (request, socket, head) => {
   const path = new URL(request.url || '/', 'http://localhost').pathname;
   if (path === '/api/live') live.upgrade(request, socket, head);
   else if (path === '/api/activity') activityServer.handleUpgrade(request, socket, head, (ws) => activityServer.emit('connection', ws, request));
+  else if (path === '/api/work/events') workServer.handleUpgrade(request, socket, head, (ws) => workServer.emit('connection', ws, request));
   else socket.destroy();
 });
 
 async function start() {
   await registry.initialize();
-  await Promise.all([settings.initialize(), assistantSettings.initialize(), activity.initialize()]);
+  await Promise.all([settings.initialize(), assistantSettings.initialize(), uiThemes.initialize(), agentConfig.initialize(), activity.initialize()]);
   await mediaJobs.initialize();
   await workspace.initialize();
   await git.initialize();
+  orchestrator.initialize();
   server.listen(config.appPort, '127.0.0.1', () => {
     activity.register({ id: `system-${randomUUID()}`, workspaceId: registry.active().id, source: 'system', title: 'Cowork server started', message: `Listening on 127.0.0.1:${config.appPort}`, status: 'succeeded' });
     console.log(`Cowork server: http://127.0.0.1:${config.appPort}`);
     console.log(`Workspace preview: ${workspace.previewUrl}`);
     if (!config.geminiKey) console.warn('GEMINI_API_KEY is missing; the UI will run but Gemini features are disabled.');
   });
+}
+
+function simulateRouting(input: any): RoutingSimulation {
+  const stageAliases: Record<string, AgentStage> = { planning: 'planner', research: 'researcher', implementation: 'coder', review: 'reviewer', resolution: 'resolver', media: 'media' };
+  const requested = String(input?.stage || 'coder'); const stage = stageAliases[requested] || requested as AgentStage;
+  const snapshot = agentConfig.get(); const workspaceId = registry.active().id;
+  const profiles: RoutableAgentProfile[] = snapshot.profiles.map((profile) => {
+    const override = snapshot.overrides.find((item) => item.agentId === profile.id && item.workspaceId === workspaceId);
+    return {
+      id: profile.id, name: profile.name, enabled: override?.enabled ?? profile.enabled, stages: profile.stages,
+      capabilities: profile.capabilities, tools: override?.toolIds?.filter((id) => profile.toolIds.includes(id)) || profile.toolIds,
+      secrets: override?.secretGrantIds || profile.secretGrantIds, priority: override?.priority ?? profile.priority,
+      maxConcurrency: profile.maxConcurrency, model: profile.model,
+      riskClass: profile.toolIds.some((id) => ['apply_edits', 'run_command', 'install_dependencies'].includes(id)) ? 'mutating' : 'read-only',
+      secretExposure: snapshot.secrets.some((secret) => secret.exposure === 'model_readable' && secret.agentIds.includes(profile.id)) ? 'model_readable' : 'none',
+      configurationErrors: snapshot.skills.filter((skill) => skill.enabled && (override?.skillIds || profile.skillIds).includes(skill.id)).flatMap((skill) => [
+        ...skill.requiredToolIds.filter((id) => !(override?.toolIds || profile.toolIds).includes(id)).map((id) => `skill ${skill.name} requires tool ${id}`),
+        ...skill.requiredSecretKinds.filter((kind) => !snapshot.secrets.some((secret) => secret.kind === kind && secret.agentIds.includes(profile.id) && (secret.scope === 'global' || secret.workspaceId === workspaceId))).map((kind) => `skill ${skill.name} requires secret kind ${kind}`),
+      ]),
+      routingRules: profile.routingRules.filter((rule) => rule.enabled).map((rule) => ({ id: rule.id, weight: rule.weight, stages: rule.stages, capabilities: rule.capabilities, keywords: rule.keywords, fileGlobs: rule.fileGlobs, exclude: rule.effect === 'exclude' })),
+    };
+  });
+  let decision = new AgentRouter({ tieThreshold: snapshot.routing.tieThreshold }).route({
+    stage, objective: String(input?.objective || ''), requiredCapabilities: Array.isArray(input?.requiredCapabilities) ? input.requiredCapabilities.map(String) : [], requiredTools: Array.isArray(input?.requiredTools) ? input.requiredTools.map(String) : [], semanticScores: Object.fromEntries(profiles.map((profile) => [profile.id, 50])),
+  }, profiles);
+  if (snapshot.routing.mode === 'priority_first' && decision.status === 'tie') decision = { status: 'selected', selected: decision.candidates[0], candidates: decision.candidates, excluded: decision.excluded, preferred: false, reason: `Selected ${decision.candidates[0].name} by strict priority policy.` };
+  if (snapshot.routing.mode === 'ask_on_overlap' && decision.status === 'selected' && !decision.preferred && decision.candidates.length > 1) decision = { status: 'tie', candidates: decision.candidates, excluded: decision.excluded, reason: 'Multiple eligible agents overlap and the routing policy requires a user choice.' };
+  const ranked = decision.status === 'no_eligible' ? [] : decision.candidates;
+  return {
+    ...(decision.status === 'selected' ? { selectedAgentId: decision.selected.id } : {}), requiresUserChoice: decision.status === 'tie', reason: decision.reason,
+    candidates: profiles.map((profile) => {
+      const candidate = ranked.find((item) => item.id === profile.id); const excluded = decision.excluded.find((item) => item.id === profile.id);
+      return { agentId: profile.id, agentName: profile.name || profile.id, eligible: !!candidate, score: candidate?.score.total, reasons: candidate ? [candidate.matchedRules.length ? `Matched ${candidate.matchedRules.join(', ')}` : 'Eligible'] : [], exclusions: excluded?.reasons || [] };
+    }),
+  };
 }
 
 async function catalog() { return registry.summaries((id) => settings.get(id)); }
@@ -310,4 +433,4 @@ async function routeStatus(response: express.Response, status: number, operation
 
 start().catch((error) => { activity.recordFailure({ id: `system-${randomUUID()}`, source: 'system', title: 'Cowork server failed to start', message: (error as Error).message }); console.error(error); process.exitCode = 1; });
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => process.exit(0)));
+for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, () => server.close(() => { workStore.close(); process.exit(0); }));

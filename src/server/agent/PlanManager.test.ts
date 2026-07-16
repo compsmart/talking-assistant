@@ -3,7 +3,7 @@ import { PlanManager } from './PlanManager.js';
 import { WorkspaceMutationLock } from '../workspace/WorkspaceMutationLock.js';
 
 describe('PlanManager concurrency', () => {
-  it('holds the workspace lock and rejects a second agent run while planning', async () => {
+  it('does not hold the workspace mutation lock and rejects a second planner run', async () => {
     let finish!: (value: any) => void;
     const planning = new Promise<any>((resolve) => { finish = resolve; });
     const lock = new WorkspaceMutationLock();
@@ -17,14 +17,14 @@ describe('PlanManager concurrency', () => {
     );
 
     const run = manager.create({ objective: 'Build a complex feature' });
-    expect(run.kind).toBe('planning'); expect(lock.busy).toBe(true);
-    expect(() => manager.create({ objective: 'Start another plan' })).toThrow(/already working/);
+    expect(run.kind).toBe('planning'); expect(lock.busy).toBe(false);
+    expect(() => manager.create({ objective: 'Start another plan' })).toThrow(/planning run is already active/i);
     finish({ status: 'completed', content: '# Plan', interactionCount: 1, segment: 1 });
     await vi.waitFor(() => expect(manager.getActive()).toBeUndefined());
     expect(lock.busy).toBe(false);
   });
 
-  it('pauses with the lock held and resumes only the matching planning run', async () => {
+  it('pauses without locking mutations and resumes only the matching planning run', async () => {
     const continuation = { previousInteractionId: 'interaction-79', input: [{ type: 'function_result' }], interactionCount: 80, segment: 1 };
     const perform = vi.fn()
       .mockResolvedValueOnce({ status: 'paused', reason: 'step_limit', message: 'Continue?', continuation })
@@ -38,7 +38,7 @@ describe('PlanManager concurrency', () => {
     );
     const run = manager.create({ objective: 'Plan a large migration' });
     await vi.waitFor(() => expect(manager.getActive()?.status).toBe('awaiting_continuation'));
-    expect(lock.busy).toBe(true); expect(manager.continue('another-run', true)).toBe(false);
+    expect(lock.busy).toBe(false); expect(manager.continue('another-run', true)).toBe(false);
     expect(manager.continue(run.id, true)).toBe(true);
     await vi.waitFor(() => expect(manager.getActive()).toBeUndefined());
     expect(perform).toHaveBeenCalledTimes(2);

@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { run } from '../process.js';
 
 interface StoredArtifact extends Omit<MediaArtifact, 'url'> { path: string }
-interface InternalJob extends Omit<MediaJobSnapshot, 'artifacts'> { artifacts: StoredArtifact[]; cancelled: boolean; jobDir: string }
+interface InternalJob extends Omit<MediaJobSnapshot, 'artifacts'> { artifacts: StoredArtifact[]; cancelled: boolean; jobDir: string; targetRoot?: string }
 type WorkspacePublisher = (taskId: string, workspaceId: string) => Promise<{ version: string }>;
 const STAGES: MediaStageName[] = ['brief', 'normalize', 'generate', 'extract', 'matte', 'encode', 'publish'];
 
@@ -32,12 +32,12 @@ export class MediaJobManager {
     await this.prune();
   }
 
-  async create(request: MediaJobRequest) {
+  async create(request: MediaJobRequest, targetRoot?: string) {
     validateRequest(request); const context = this.registry.active(); const id = randomUUID(); const now = new Date().toISOString(); const jobDir = join(context.mediaJobsDir, id); await mkdir(jobDir, { recursive: true });
-    const stablePaths = stablePathsFor(request); await this.createPlaceholders(context.draftDir, request, stablePaths);
+    const stablePaths = stablePathsFor(request); await this.createPlaceholders(targetRoot || context.draftDir, request, stablePaths);
     const stages: MediaStageState[] = STAGES.map((name) => ({ name, status: name === 'brief' ? 'ready' : 'pending', progress: name === 'brief' ? 100 : 0, attempt: 0, artifactIds: [] }));
-    const job: InternalJob = { kind: 'media', id, workspaceId: context.id, parentRunId: request.parentRunId, status: 'queued', request: structuredClone(request), revision: 1, selectedRevision: 1, stablePaths, stages, artifacts: [], settings: { matte: { ...DEFAULT_MATTE, ...('matte' in request ? request.matte : {}) }, encoding: { ...DEFAULT_ENCODING, ...('encoding' in request ? request.encoding : {}), fps: 12, frameCount: 48 } }, createdAt: now, updatedAt: now, cancelled: false, jobDir };
-    this.jobs.set(id, job); await this.persist(job); this.activity.update(this.public(job)); await this.activity.emit(id, 'status', 'media', `Queued ${request.kind} media job; placeholders are ready`, { paths: stablePaths, parentRunId: request.parentRunId }); this.enqueue(job); return this.public(job);
+    const job: InternalJob = { kind: 'media', id, workspaceId: context.id, parentRunId: request.parentRunId, status: 'queued', request: structuredClone(request), revision: 1, selectedRevision: 1, stablePaths, stages, artifacts: [], settings: { matte: { ...DEFAULT_MATTE, ...('matte' in request ? request.matte : {}) }, encoding: { ...DEFAULT_ENCODING, ...('encoding' in request ? request.encoding : {}), fps: 12, frameCount: 48 } }, createdAt: now, updatedAt: now, cancelled: false, jobDir, targetRoot };
+    this.jobs.set(id, job); await this.persist(job); this.activity.update(this.public(job)); await this.activity.emit(id, 'status', 'media', `Queued ${request.kind} media job; placeholders are ready`, { paths: stablePaths, parentRunId: request.parentRunId }); const completion = this.enqueue(job); if (targetRoot) await completion; return this.public(job);
   }
 
   list(workspaceId = this.registry.active().id) { return [...this.jobs.values()].filter((job) => job.workspaceId === workspaceId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).map((job) => this.public(job)); }
@@ -76,7 +76,8 @@ export class MediaJobManager {
   notifyWorkspaceActivated(workspaceId: string) { for (const job of this.jobs.values()) if (job.workspaceId === workspaceId && job.status === 'review') void this.publish(job); }
 
   private enqueue(job: InternalJob, deterministic = false) {
-    const previous = this.queues.get(job.workspaceId) || Promise.resolve(); const next = previous.catch(() => undefined).then(() => this.execute(job, deterministic)); this.queues.set(job.workspaceId, next); void next.finally(() => { if (this.queues.get(job.workspaceId) === next) this.queues.delete(job.workspaceId); });
+    const previous = this.queues.get(job.workspaceId) || Promise.resolve(); const next = previous.catch(() => undefined).then(() => this.execute(job, deterministic)); this.queues.set(job.workspaceId, next); const cleanup = () => { if (this.queues.get(job.workspaceId) === next) this.queues.delete(job.workspaceId); }; void next.then(cleanup, cleanup);
+    return next;
   }
 
   private async execute(job: InternalJob, deterministic: boolean) {
@@ -86,11 +87,12 @@ export class MediaJobManager {
         const stage = job.stages.find((item) => item.name === event.stage)!; stage.status = 'running'; stage.progress = event.progress; stage.attempt = Math.max(1, stage.attempt); this.touch(job); await this.persist(job); this.activity.update(this.public(job)); await this.activity.emit(job.id, 'status', event.stage, event.message);
       };
       if (deterministic && job.request.kind !== 'animation') throw new Error('Only animation jobs support deterministic frame reprocessing.');
+      const executionContext = { ...this.registry.get(job.workspaceId), ...(job.targetRoot ? { draftDir: job.targetRoot } : {}) };
       const result = job.request.kind !== 'animation'
-        ? await this.agent.generateAsset(this.registry.get(job.workspaceId), job.request as any, job.jobDir, () => job.cancelled, report)
+        ? await this.agent.generateAsset(executionContext, job.request as any, job.jobDir, () => job.cancelled, report)
         : deterministic
         ? await this.agent.reprocessAnimation(job.jobDir, job.revision, job.settings.matte, job.settings.encoding, () => job.cancelled, report)
-        : await this.agent.generateAnimation(this.registry.get(job.workspaceId), job.request as AnimationMediaJobRequest, job.jobDir, job.settings.matte, job.settings.encoding, () => job.cancelled, report);
+        : await this.agent.generateAnimation(executionContext, job.request as AnimationMediaJobRequest, job.jobDir, job.settings.matte, job.settings.encoding, () => job.cancelled, report);
       if (job.cancelled) return; job.artifacts = [...job.artifacts, ...result.artifacts.map((artifact) => ({ ...artifact, id: randomUUID(), revision: job.revision, createdAt: new Date().toISOString() }))];
       for (const stage of job.stages) { if (stage.name !== 'publish') { stage.status = 'ready'; stage.progress = 100; stage.artifactIds = job.artifacts.filter((artifact) => artifact.stage === stage.name).map((artifact) => artifact.id); } }
       (job as any).resultFiles = { output: result.output, audio: result.audio }; job.status = 'review'; this.touch(job); await this.persist(job); this.activity.update(this.public(job)); await this.publish(job);
@@ -98,13 +100,14 @@ export class MediaJobManager {
   }
 
   private async publish(job: InternalJob, force = false) {
-    if (!force && (!this.registry.isActive(job.workspaceId) || this.lock.busy)) { job.status = 'review'; this.touch(job); await this.persist(job); this.activity.update(this.public(job)); if (this.registry.isActive(job.workspaceId)) setTimeout(() => void this.publish(job).catch(() => undefined), 1000); return; }
+    if (!job.targetRoot && !force && (!this.registry.isActive(job.workspaceId) || this.lock.busy)) { job.status = 'review'; this.touch(job); await this.persist(job); this.activity.update(this.public(job)); if (this.registry.isActive(job.workspaceId)) setTimeout(() => void this.publish(job).catch(() => undefined), 1000); return; }
     const files = (job as any).resultFiles as { output?: string; audio?: string } | undefined; if (!files?.output) throw statusError('This media job has no valid output to publish.', 409);
     job.status = 'publishing'; this.touch(job); this.activity.update(this.public(job));
-    await this.lock.run('media publication', async () => {
-      const context = this.registry.get(job.workspaceId); await atomicCopy(files.output!, join(context.draftDir, job.stablePaths[0])); if (files.audio && job.stablePaths[1]) await atomicCopy(files.audio, join(context.draftDir, job.stablePaths[1])); await upsertManifest(context.draftDir, job, files.audio ? job.stablePaths[1] : undefined);
-      const published = await this.publishWorkspace(job.id, job.workspaceId); job.previewVersion = published.version;
-    });
+    const publish = async () => {
+      const root = job.targetRoot || this.registry.get(job.workspaceId).draftDir; await atomicCopy(files.output!, join(root, job.stablePaths[0])); if (files.audio && job.stablePaths[1]) await atomicCopy(files.audio, join(root, job.stablePaths[1])); await upsertManifest(root, job, files.audio ? job.stablePaths[1] : undefined);
+      if (!job.targetRoot) { const published = await this.publishWorkspace(job.id, job.workspaceId); job.previewVersion = published.version; }
+    };
+    if (job.targetRoot) await publish(); else await this.lock.run('media publication', publish);
     job.status = 'completed'; const stage = job.stages.find((item) => item.name === 'publish')!; stage.status = 'ready'; stage.progress = 100; this.touch(job); await this.persist(job); this.activity.update(this.public(job)); await this.activity.emit(job.id, 'complete', 'publish', `Published ${job.stablePaths.join(' and ')}`, { paths: job.stablePaths });
   }
 
@@ -116,7 +119,7 @@ export class MediaJobManager {
     else await placeholder(['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-t', '0.1', '-c:a', 'libmp3lame', '-q:a', '9', primary]);
     if (paths[1]) { await mkdir(dirname(join(draftDir, paths[1])), { recursive: true }); await placeholder(['-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-t', '0.1', '-c:a', 'libmp3lame', '-q:a', '9', join(draftDir, paths[1])]); }
   }
-  private public(job: InternalJob): MediaJobSnapshot { const { cancelled: _cancelled, jobDir: _jobDir, artifacts, ...snapshot } = job; return { ...snapshot, artifacts: artifacts.map(({ path: _path, ...artifact }) => ({ ...artifact, url: `/api/media-jobs/${job.id}/artifacts/${artifact.id}` })) }; }
+  private public(job: InternalJob): MediaJobSnapshot { const { cancelled: _cancelled, jobDir: _jobDir, targetRoot: _targetRoot, artifacts, ...snapshot } = job; return { ...snapshot, artifacts: artifacts.map(({ path: _path, ...artifact }) => ({ ...artifact, url: `/api/media-jobs/${job.id}/artifacts/${artifact.id}` })) }; }
   private require(id: string) { const job = this.jobs.get(id); if (!job) throw statusError('Media job not found.', 404); return job; }
   private assertWorkspace(job: InternalJob) { if (job.workspaceId !== this.registry.active().id) throw statusError('Media job belongs to another workspace.', 404); }
   private touch(job: InternalJob) { job.updatedAt = new Date().toISOString(); }

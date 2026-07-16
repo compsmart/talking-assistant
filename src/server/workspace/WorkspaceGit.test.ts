@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { WorkspaceGit } from './WorkspaceGit.js';
+import { fileManagerCommitMessage, WorkspaceGit } from './WorkspaceGit.js';
 
 const temporary: string[] = [];
 afterEach(async () => { await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true }))); });
@@ -46,5 +46,17 @@ describe('WorkspaceGit status fingerprint', () => {
     const untracked = await git.status();
     await writeFile(join(context.draftDir, 'new.txt'), 'second', 'utf8');
     expect((await git.status()).fingerprint).not.toBe(untracked.fingerprint);
+  });
+});
+
+describe('file manager commit messages', () => {
+  it('uses the action as the subject for one file change', () => {
+    expect(fileManagerCommitMessage(['user updated file something.txt'])).toBe('user updated file something.txt');
+  });
+
+  it('compiles several actions into one commit message', () => {
+    expect(fileManagerCommitMessage(['user deleted file old.txt', 'user created file new.txt'])).toBe(
+      'user file manager activity (2 actions)\n\n- user deleted file old.txt\n- user created file new.txt',
+    );
   });
 });

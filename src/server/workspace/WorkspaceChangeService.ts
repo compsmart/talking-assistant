@@ -61,7 +61,7 @@ export class WorkspaceChangeService {
         const published = await this.workspace.publish(taskId, { mode, browserGuard: options.previewOnly || settings.codingAgent.validation === 'fast' });
         this.activity?.finish(taskId, 'succeeded', `Published ${changedFiles.length} changed file(s).`, { paths: changedFiles.map((file) => file.path) });
         return { value, changedFiles, checks, ...published };
-      } catch (error) { await this.workspace.restoreDraft(); throw error; }
+      } catch (error) { await this.workspace.restoreDraft(taskId); throw error; }
     }); } catch (error) {
       await this.activity?.emit(taskId, 'error', 'failed', (error as Error).message);
       this.activity?.finish(taskId, 'failed', (error as Error).message, { severity: 'error', paths: options.paths });

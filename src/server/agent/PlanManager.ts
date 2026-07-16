@@ -9,12 +9,14 @@ import type { WorkspaceRegistry } from '../workspace/WorkspaceRegistry.js';
 import type { PlanningAgent } from './PlanningAgent.js';
 import type { PlanStore } from './PlanStore.js';
 import type { PlanningContinuationState } from './PlanningAgent.js';
+import type { AgentRuntimeProfile } from './CodingAgent.js';
 
 interface InternalPlan extends PlanningRunSnapshot {
   cancelled: boolean;
   referenceWorkspaceIds: string[];
   continuationState?: PlanningContinuationState;
   continuationDecision?: (proceed: boolean) => void;
+  agentProfile?: AgentRuntimeProfile;
 }
 
 export class PlanManager {
@@ -25,13 +27,13 @@ export class PlanManager {
     private readonly grants: WorkspaceReferenceGrants, private readonly registry: WorkspaceRegistry,
   ) {}
 
-  create(request: PlanRequest) {
+  create(request: PlanRequest, agentProfile?: AgentRuntimeProfile) {
     if (!request.objective?.trim()) throw statusError('Planning objective is required.', 400);
-    if (this.active || this.lock.busy) throw statusError(`An agent is already working${this.lock.currentOwner ? `: ${this.lock.currentOwner}` : ''}.`, 409);
+    if (this.active) throw statusError('A planning run is already active.', 409);
     const now = new Date().toISOString(); const referenceWorkspaceIds = this.grants.resolve(request.referenceGrantId);
     const plan: InternalPlan = {
       kind: 'planning', id: randomUUID(), workspaceId: this.registry.active().id, status: 'queued',
-      request: normalizeRequest(request), createdAt: now, updatedAt: now, cancelled: false, referenceWorkspaceIds,
+      request: normalizeRequest(request), createdAt: now, updatedAt: now, cancelled: false, referenceWorkspaceIds, agentProfile,
     };
     this.active = plan; this.activity.update(publicPlan(plan)); void this.activity.emit(plan.id, 'status', 'queue', 'Planning task queued'); void this.run(plan);
     return publicPlan(plan);
@@ -48,14 +50,14 @@ export class PlanManager {
 
   private async run(plan: InternalPlan) {
     try {
-      await this.lock.run('the planning agent', async () => {
+      await (async () => {
         this.setStatus(plan, 'planning'); await this.activity.emit(plan.id, 'status', 'planning', `Planning: ${plan.request.objective}`);
         const context = await this.tools.buildTaskContext(plan.request);
         await this.activity.emit(plan.id, 'status', 'context', `Preloaded ${context.fileCount} source paths and ${context.matchCount} ranked match(es)${context.truncated ? ' within the 24 KB cap' : ''}`);
         const settings = this.settings.get(); const referenceNames = plan.referenceWorkspaceIds.map((id) => this.registry.get(id).name);
         const prompt = promptFor(plan.request, settings, context.text, referenceNames);
         while (true) {
-          const outcome = await this.agent.perform(plan.id, prompt, () => plan.cancelled, plan.referenceWorkspaceIds, plan.continuationState);
+          const outcome = await this.agent.perform(plan.id, prompt, () => plan.cancelled, plan.referenceWorkspaceIds, plan.continuationState, plan.agentProfile);
           if (plan.cancelled) throw new Error('Planning cancelled');
           if (outcome.status === 'completed') {
             const record = await this.store.saveGenerated(plan.id, plan.request, plan.referenceWorkspaceIds, outcome.content);
@@ -72,7 +74,7 @@ export class PlanManager {
           plan.continuation = undefined; this.setStatus(plan, 'planning');
           await this.activity.emit(plan.id, 'status', 'planning', `Resuming planning segment ${outcome.continuation.segment + 1} with the preserved interaction context`);
         }
-      });
+      })();
     } catch (error) {
       const cancelled = plan.cancelled || (error as Error).message === 'Planning cancelled';
       const result: PlanResult = { planId: plan.id, status: cancelled ? 'cancelled' : 'failed', summary: cancelled ? 'Planning cancelled.' : (error as Error).message };
@@ -97,5 +99,5 @@ function promptFor(request: PlanRequest, settings: WorkspaceSettings, context: s
   return `${context ? `Preloaded project context:\n\n${context}\n\n--- END PRELOADED CONTEXT ---\n\n` : ''}Create a decision-complete implementation plan for this ${settings.mode.toUpperCase()} workspace request:\n\n${request.objective}${request.successCriteria?.length ? `\n\nSuccess criteria:\n${request.successCriteria.map((item) => `- ${item}`).join('\n')}` : ''}${selection}${files}${references}\n\nInspect the current project with read-only tools before finalizing the plan. Preserve existing conventions and make every numbered implementation step suitable for a coding-agent todo.`;
 }
 
-function publicPlan(plan: InternalPlan): PlanningRunSnapshot { const { cancelled: _cancelled, referenceWorkspaceIds: _references, continuationState: _state, continuationDecision: _decision, ...value } = plan; return value; }
+function publicPlan(plan: InternalPlan): PlanningRunSnapshot { const { cancelled: _cancelled, referenceWorkspaceIds: _references, continuationState: _state, continuationDecision: _decision, agentProfile: _profile, ...value } = plan; return value; }
 function statusError(message: string, status: number) { const error = new Error(message) as Error & { status?: number }; error.status = status; return error; }
