@@ -109,7 +109,7 @@ export class WorkOrchestrator {
     }
     if (decision.action === 'plan' && this.plans.getActive()) { this.store.update(work.id, (item) => ({ ...item, strategy: 'plan_first', status: 'queued' })); return; }
     const planning = decision.action === 'plan';
-    const executionRole = planning ? 'planner' : work.attempts.some((attempt) => attempt.status === 'failed' && ['coder', 'resolver'].includes(attempt.role)) ? 'resolver' : 'coder';
+    const executionRole = planning ? 'planner' : decision.action === 'media' ? 'media' : work.attempts.some((attempt) => attempt.status === 'failed' && ['coder', 'resolver'].includes(attempt.role)) ? 'resolver' : 'coder';
     const selection = await this.assistant.selectAgent(work, executionRole, this.store.list(work.workspaceId));
     if (selection.status !== 'selected') {
       const questionId = `agent-selection:${work.specRevision}`;
@@ -126,7 +126,8 @@ export class WorkOrchestrator {
     let approvedPlanContent: string | undefined; let referenceWorkspaceIds = grant;
     if (work.plan) { const plan = await this.planStore.read(work.plan.path, work.workspaceId); approvedPlanContent = plan.content; const record = await this.planStore.getByPath(work.plan.path, work.workspaceId); referenceWorkspaceIds = record?.referenceWorkspaceIds || []; }
     const attemptId = randomUUID(); this.active.set(work.id, { kind: 'concurrent', runId: attemptId });
-    const running = this.store.update(work.id, (item) => ({ ...item, status: 'running', startedAt: item.startedAt || new Date().toISOString(), subtasks: [{ id: `${item.id}:code`, workId: item.id, role: executionRole, objective: item.request.objective, status: 'running', dependencies: [], writeScope: decision.writeScope, attemptIds: [attemptId] }], attempts: [...item.attempts, { id: attemptId, workId: item.id, subtaskId: `${item.id}:code`, role: executionRole, status: 'running', specRevision: item.specRevision, agentId: selection.agent.id, agentName: selection.agent.name, profileRevision: selection.agent.revision, routingReason: selection.reason, changedFiles: [], startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }] }));
+    const subtaskId = `${work.id}:${executionRole}`;
+    const running = this.store.update(work.id, (item) => ({ ...item, status: 'running', startedAt: item.startedAt || new Date().toISOString(), subtasks: [{ id: subtaskId, workId: item.id, role: executionRole, objective: item.request.objective, status: 'running', dependencies: [], writeScope: decision.writeScope, attemptIds: [attemptId] }], attempts: [...item.attempts, { id: attemptId, workId: item.id, subtaskId, role: executionRole, status: 'running', specRevision: item.specRevision, agentId: selection.agent.id, agentName: selection.agent.name, profileRevision: selection.agent.revision, routingReason: selection.reason, changedFiles: [], startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() }] }));
     void this.runner.execute(running, attemptId, referenceWorkspaceIds, approvedPlanContent, selection.agent).then((result) => this.finishCoding(work.id, attemptId, result)).finally(() => { if (this.active.get(work.id)?.runId === attemptId) this.active.delete(work.id); void this.drain(); });
   }
 

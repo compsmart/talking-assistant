@@ -43,6 +43,7 @@ export class AvatarController {
   }
 
   ensureAudio() { this.player.ensureContext(); }
+  setMuted(muted: boolean) { this.player.setMuted(muted); }
   enqueueAudio(samples: Float32Array) { const startsAt = this.player.enqueue(samples); this.lipsync.feed(samples, startsAt); }
   interrupt() { this.player.flush(); this.lipsync.clear(); }
   setBlend(value: number) { this.blendTarget = Math.max(0, Math.min(1, value)); }

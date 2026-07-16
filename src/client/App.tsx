@@ -13,7 +13,7 @@ import { SurfaceVision } from './live/SurfaceVision';
 import { cancelPlan, cancelTask, continuePlan, createPlan, createTask, executePlan, getActiveRun, getPendingPlan, watchAgentRun } from './agent/TaskClient';
 import { approveWorkPlan, cancelWork, getWork, listWork, submitWork, updateWork, watchWork as watchWorkFeed } from './agent/WorkClient';
 import type { AvatarController } from './avatar/AvatarController';
-import { editFiles, generateImageAsset, listFiles, readFile, searchFiles, uploadFiles } from './files/FileClient';
+import { editFiles, listFiles, readFile, searchFiles, uploadFiles } from './files/FileClient';
 import { WorkspaceSettingsPanel } from './components/WorkspaceSettingsPanel';
 import { AssistantSettingsPanel } from './components/AssistantSettingsPanel';
 import { AgentsPanel } from './components/AgentsPanel';
@@ -46,6 +46,9 @@ const paths = {
   activity: 'M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m2 4v2h8V7zm0 4v2h12v-2zm0 4v2h7v-2zm12.5-.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 0 0 0-5',
   agents: 'M8 11a3 3 0 1 0 0-6a3 3 0 0 0 0 6m8-1a2.5 2.5 0 1 0 0-5a2.5 2.5 0 0 0 0 5M2 20v-2c0-3 2.7-5 6-5s6 2 6 5v2zm12.5 0v-2c0-1.5-.5-2.8-1.4-3.9c.9-.7 1.9-1.1 3.1-1.1c3 0 5.3 2 5.3 5v2z',
   palette: 'M12 3a9 9 0 0 0 0 18h1.5a2.5 2.5 0 0 0 0-5H12a2 2 0 0 1 0-4h5.7A3.3 3.3 0 0 0 21 8.7C21 5.6 17 3 12 3M7 9a1.5 1.5 0 1 1 0-3a1.5 1.5 0 0 1 0 3m4-2a1.5 1.5 0 1 1 3 0a1.5 1.5 0 0 1-3 0m5 3a1.5 1.5 0 1 1 3 0a1.5 1.5 0 0 1-3 0M7.5 15a1.5 1.5 0 1 1 0-3a1.5 1.5 0 0 1 0 3',
+  subtitles: 'M3 5h18v14H3zm2 2v10h14V7zm2 3h4v2H9v2h2v2H7zm6 0h4v2h-2v2h2v2h-4z',
+  volume: 'M4 9h4l5-4v14l-5-4H4zm11.5-.5a5 5 0 0 1 0 7l-1.4-1.4a3 3 0 0 0 0-4.2zm2.8-2.8a9 9 0 0 1 0 12.6l-1.4-1.4a7 7 0 0 0 0-9.8z',
+  volumeMuted: 'M4 9h4l5-4v14l-5-4H4zm11.4.2 1.4-1.4 2.2 2.2 2.2-2.2 1.4 1.4-2.2 2.2 2.2 2.2-1.4 1.4-2.2-2.2-2.2 2.2-1.4-1.4 2.2-2.2z',
   settings: 'M19.43 12.98c.04-.32.07-.65.07-.98s-.02-.66-.07-.98l2.11-1.65-2-3.46-2.49 1a7.2 7.2 0 0 0-1.69-.98L15 3.25h-4l-.37 2.68c-.6.25-1.17.58-1.69.98l-2.49-1-2 3.46 2.11 1.65c-.04.32-.07.66-.07.98s.03.66.07.98l-2.11 1.65 2 3.46 2.49-1c.52.41 1.09.74 1.69.98l.37 2.68h4l.37-2.68c.6-.25 1.17-.58 1.69-.98l2.49 1 2-3.46zM13 15.5A3.5 3.5 0 1 1 13 8a3.5 3.5 0 0 1 0 7.5',
 };
 
@@ -66,6 +69,8 @@ export function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [caption, setCaption] = useState('');
   const [captionFading, setCaptionFading] = useState(false);
+  const [subtitlesOn, setSubtitlesOn] = useState(() => localStorage.getItem('cowork.avatar.subtitles') !== 'off');
+  const [voiceMuted, setVoiceMuted] = useState(() => localStorage.getItem('cowork.avatar.voice-muted') === 'true');
   const [error, setError] = useState('');
   const [task, setTask] = useState<AgentRunSnapshot>();
   const [events, setEvents] = useState<ActivityEvent[]>([]);
@@ -110,6 +115,7 @@ export function App() {
   const assistantPhotoRef = useRef<Blob | undefined>(undefined);
   const captionRef = useRef('');
   const agentSpeakingRef = useRef(false);
+  const voiceMutedRef = useRef(voiceMuted);
   const captionFadeTimer = useRef<number | undefined>(undefined);
   const captionClearTimer = useRef<number | undefined>(undefined);
   const uploadSequence = useRef(0);
@@ -171,8 +177,12 @@ export function App() {
   }, [clearCaptionTimers, scheduleCaptionFade]);
   const avatarReady = useCallback((controller: AvatarController) => {
     avatar.current = controller; controller.onSpeakingChange = handleSpeakingChange; controller.configureAppearance(assistantProfileRef.current.settings.appearance);
+    controller.setMuted(voiceMutedRef.current);
     if (assistantPhotoRef.current) void controller.applyPhoto(blobAsFile(assistantPhotoRef.current)).then(() => controller.configureAppearance(assistantProfileRef.current.settings.appearance));
   }, [handleSpeakingChange]);
+
+  useEffect(() => { localStorage.setItem('cowork.avatar.subtitles', subtitlesOn ? 'on' : 'off'); }, [subtitlesOn]);
+  useEffect(() => { voiceMutedRef.current = voiceMuted; localStorage.setItem('cowork.avatar.voice-muted', String(voiceMuted)); avatar.current?.setMuted(voiceMuted); }, [voiceMuted]);
 
   const syncWorkspaceFrame = useCallback(async () => {
     if (canvasOpenRef.current) { await surfaceVision.current?.sendNow(); return; }
@@ -353,7 +363,7 @@ export function App() {
     const sequence = ++uploadSequence.current;
     setUploadProgress(0);
     try {
-      const result = await uploadFiles(files, { destination, onProgress: (progress) => {
+      const result = await uploadFiles(files, { destination, accept: destination !== undefined ? 'file' : undefined, onProgress: (progress) => {
         if (uploadSequence.current !== sequence) return;
         setUploadProgress(progress >= 0.995 ? undefined : progress);
       } });
@@ -413,14 +423,15 @@ export function App() {
 
   useEffect(() => {
     live.onToolCalls = async (calls) => {
-      live.inputBlocked = calls.some((call) => call.name === 'generate_image_asset');
+      live.inputBlocked = false;
       let responses: Array<{ id: string; name: string; response: { result?: unknown; error?: string } }>;
       try { responses = await live.executeToolCalls(calls, async (call) => {
         try {
           let result: unknown;
           if (call.name === 'submit_work') {
+            const objective = String(call.args?.objective || '');
             const grant = await referenceGrant.current; result = await submitWork({
-              objective: String(call.args?.objective || ''), strategy: call.args?.strategy as any, dedupeMode: call.args?.dedupeMode as any, clientRequestId: call.id,
+              objective, strategy: call.args?.strategy as any, dedupeMode: call.args?.dedupeMode as any, clientRequestId: call.id,
               preferredAgentId: call.args?.preferredAgentId ? String(call.args.preferredAgentId) : undefined,
               successCriteria: Array.isArray(call.args?.successCriteria) ? call.args.successCriteria.map(String) : [], selectedElement: call.args?.useSelectedElement === false ? undefined : selection,
               selectedFiles, includeCanvasImage: call.args?.includeWorkspacePreview === true, referenceGrantId: grant?.id,
@@ -453,23 +464,7 @@ export function App() {
               if (tool) panel.setTool(tool); const layerIds = addPaths.length ? await panel.addWorkspaceImages(addPaths) : [];
               result = { component, open: true, addedPaths: addPaths, layerIds, tool: tool || panel.getContext().tool };
             } else throw new Error('Unknown UI component. Use file_manager or image_editor.');
-          } else if (call.name === 'generate_image_asset') {
-            const panel = await openCanvasPanel(); setCanvasBusy('Generating image…');
-            try {
-              const generated = await generateImageAsset({
-                prompt: String(call.args?.prompt || ''), name: String(call.args?.name || ''), transparent: call.args?.transparent === true,
-                referenceImages: Array.isArray(call.args?.referenceImages) ? call.args.referenceImages.map(String) : [],
-                aspectRatio: call.args?.aspectRatio as any,
-              });
-              setPreviewVersion(generated.version); setFileRefreshKey((value) => value + 1);
-              const placement = call.args?.placement && typeof call.args.placement === 'object' ? call.args.placement as Record<string, unknown> : {};
-              const [layerId] = await panel.addWorkspaceImages([generated.value.asset.path], {
-                x: typeof placement.x === 'number' ? placement.x : undefined, y: typeof placement.y === 'number' ? placement.y : undefined, width: typeof placement.width === 'number' ? placement.width : undefined,
-              });
-              result = { asset: generated.value.asset, layerId, workspaceVersion: generated.version, canvas: panel.getContext() };
-            } finally { setCanvasBusy(''); }
-          }
-          else if (call.name === 'get_coding_task_status' || call.name === 'get_agent_run_status') {
+          } else if (call.name === 'get_coding_task_status' || call.name === 'get_agent_run_status') {
             const active = await getActiveRun(); result = { active: !!active, run: active };
           } else if (call.name === 'get_selected_element_context') {
             result = { selected: !!selection, workspaceVersion: previewVersion, element: selection || null };
@@ -629,6 +624,11 @@ export function App() {
     <IconButton label="Open workspace settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Icon path={paths.settings} /></IconButton>
   </>;
 
+  const avatarCanvasControls = <>
+    <IconButton label={subtitlesOn ? 'Hide subtitles' : 'Show subtitles'} active={subtitlesOn} aria-pressed={subtitlesOn} onClick={() => setSubtitlesOn((value) => !value)}><Icon path={paths.subtitles} /></IconButton>
+    <IconButton label={voiceMuted ? 'Unmute assistant voice' : 'Mute assistant voice'} active={voiceMuted} aria-pressed={voiceMuted} onClick={() => setVoiceMuted((value) => !value)}><Icon path={voiceMuted ? paths.volumeMuted : paths.volume} /></IconButton>
+  </>;
+
   return (
     <div className="app-shell">
       {previewVersion
@@ -637,7 +637,7 @@ export function App() {
       <div className="status-pill"><span className={`status-led ${liveStatus}`} />{`live · ${liveStatus}`}</div>
       {selection && <div className="selection-pill"><span>Selected</span><strong>{selection.kind === 'dom' ? selection.text || selection.selector : selection.label}</strong><button onClick={clearSelection} aria-label="Clear selected element">×</button></div>}
       {!!selectedFiles.length && <div className={`selection-pill file-selection-pill ${selection ? 'with-element' : ''}`}><span>Files</span><strong>{selectedFiles.join(', ')}</strong><button onClick={() => setSelectedFiles([])} aria-label="Clear selected files">×</button></div>}
-      <AvatarPanel caption={caption} captionFading={captionFading} toolbar={toolbar} headerActions={avatarHeaderActions} onReady={avatarReady} onError={reportError} />
+      <AvatarPanel caption={subtitlesOn ? caption : ''} captionFading={captionFading} canvasControls={avatarCanvasControls} toolbar={toolbar} headerActions={avatarHeaderActions} onReady={avatarReady} onError={reportError} />
       <ChatTray open={chatOpen} caption={caption} disabled={false} onClose={() => setChatOpen(false)} onSend={sendText} />
       {taskBusy && <button className={`task-beacon ${task?.kind || ''}`} onClick={() => setTerminalOpen(true)}>{task?.status === 'awaiting_continuation' ? <span className="continuation-mark">?</span> : <span className="spinner" />} {runLabel} · {todoProgress || task?.status}</button>}
       {!!activeWorks.length && <button className="work-beacon" onClick={() => setWorkCenterOpen(true)}><span className="spinner" /> {activeWorks.filter((work) => ['running', 'planning', 'integrating', 'validating', 'publishing'].includes(work.status)).length} active · {activeWorks.filter((work) => work.status === 'queued').length} queued{activeWorks.some((work) => ['needs_input', 'awaiting_approval'].includes(work.status)) ? ' · action needed' : ''}</button>}

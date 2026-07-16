@@ -52,8 +52,19 @@ export async function getAgentTools(): Promise<AgentToolDirectory> {
 export function saveAgentConfiguration(snapshot: AgentConfigurationSnapshot, draft: AgentConfigurationDraft): Promise<AgentConfigurationSnapshot> {
   return request('/api/agent-config', {
     method: 'PUT',
-    body: JSON.stringify({ expectedRevision: snapshot.revision, ...draft }),
+    body: JSON.stringify({ expectedRevision: snapshot.revision, ...normalizeDraftRevisions(draft) }),
   });
+}
+
+export function normalizeDraftRevisions(draft: AgentConfigurationDraft): AgentConfigurationDraft {
+  const revision = <T extends { revision: number }>(item: T): T => item.revision === 0 ? { ...item, revision: 1 } : item;
+  return {
+    ...draft,
+    profiles: draft.profiles.map(revision),
+    workspaceOverrides: draft.workspaceOverrides.map(revision),
+    skills: draft.skills.map(revision),
+    contexts: draft.contexts.map(revision),
+  };
 }
 
 export function simulateAgentRouting(input: RoutingSimulationInput): Promise<RoutingSimulation> {

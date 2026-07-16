@@ -20,6 +20,11 @@ describe('WorkspaceManager sandbox command', () => {
 
     expect(args[network + 1]).toBe('bridge');
   });
+
+  it('hardens Node-script containers and supports a read-only workspace mount', () => {
+    const args = sandboxRunArgs('C:\\workspace\\draft', "node -- 'scripts/report.mjs'", false, true, true);
+    expect(args).toEqual(expect.arrayContaining(['--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m', '-v', 'C:\\workspace\\draft:/workspace:ro']));
+  });
 });
 
 describe('WorkspaceManager preview replacement', () => {

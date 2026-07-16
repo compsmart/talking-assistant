@@ -2,11 +2,11 @@ import { GoogleGenAI } from '@google/genai';
 import type { ActivityHub } from '../activity.js';
 import { config } from '../config.js';
 import type { WorkspaceTools } from '../workspace/WorkspaceTools.js';
-import type { MediaJobKind, WorkspaceSettings } from '../../shared/protocol.js';
+import type { AgentStage, MediaJobKind, WorkspaceSettings } from '../../shared/protocol.js';
 import { BUILTIN_AGENT_TOOLS, ToolCatalog } from '../agents/ToolCatalog.js';
 import { ToolBroker } from '../agents/ToolBroker.js';
 
-const BASE_SYSTEM = `You are the only coding subagent in a local cowork application. Work autonomously and make production-quality changes inside the generated project workspace.
+export const CODING_AGENT_SYSTEM = `You are the only coding subagent in a local cowork application. Work autonomously and make production-quality changes inside the generated project workspace.
 
 Workspace contract:
 - You may edit only files exposed by the workspace tools. Never attempt to access the cowork shell, host, secrets, Docker socket, or parent directories.
@@ -18,7 +18,7 @@ Workspace contract:
 - Preserve existing data-cowork-id attributes. Add concise, stable data-cowork-id values to newly created major sections and interactive controls so later visual selections map cleanly back to source; do not clutter every decorative child.
 - Use install_dependencies only when package dependencies changed. The independent validator owns routine tests, builds, and final preview inspection; do not run them yourself.
 - Keep the workspace HTML5 canvas distinct from raster media. A request to change a canvas, Canvas workspace, or selected semantic canvas layer is a request to edit the workspace implementation. Never delegate media merely because the task mentions canvas; delegate only when the user explicitly requests a new image or other media asset.
-- Delegate AI-created images, video, animation, music, and sound effects to delegate_media_task. It immediately returns stable placeholder paths; integrate those exact paths while the independent Media Agent works. Never substitute hand-coded drawings for requested generated media.
+- Delegate AI-created images, video, animation, music, and sound effects to delegate_media_task. It immediately returns stable placeholder paths. For a standalone media request, create the media job and do not edit application files, add a gallery or preview, or place the asset in HTML, CSS, JavaScript, or an HTML5 canvas. Integrate a returned media path only when the user explicitly asked to place or use the asset in the application. Never substitute hand-coded drawings for requested generated media.
 - Animation requires an explicit startFrame. For a seamless animation, use the same workspace-relative image as startFrame and endFrame. The Media Agent owns endpoint geometry, alpha, timing, audio, inspection, and encoding.
 - Generated assets are organized under assets/generated. A transparent animation is always a four-second, 48-frame, 12 FPS WebP and may include a synchronized MP3 sidecar. Ensure the project serves these formats correctly.
 - Use remove_image_background to transform an existing opaque image; when generating a new transparent subject, use delegate_media_task with kind image and transparent true instead. Use extract_image_regions to split an existing sprite, symbol, icon, or object sheet into separate transparent assets. Processed outputs are organized under assets/processed. Prefer these tools over installing image libraries or writing disposable processing scripts.
@@ -37,6 +37,8 @@ const TOOLS = [
   tool('search_reference_files', 'Search text in a user-authorized, read-only source workspace.', { workspace: stringProp('Exact workspace name'), query: stringProp('Text to find'), path: stringProp('Relative root path') }, ['workspace', 'query']),
   tool('copy_reference_file', 'Copy one regular file byte-for-byte from a user-authorized source workspace into the active workspace. The source remains unchanged.', { workspace: stringProp('Exact workspace name'), sourcePath: stringProp('Source workspace-relative file'), destinationPath: stringProp('Active workspace-relative destination') }, ['workspace', 'sourcePath', 'destinationPath']),
   tool('run_command', 'Run a Node.js/npm project command with the file utility inside an isolated Docker container without network access. Python is not installed.', { command: stringProp('Shell command to run from /workspace') }, ['command']),
+  tool('run_node_script', 'Run an existing user-defined Node.js utility beneath scripts/ in the resource-limited, network-disabled workspace sandbox. Arguments are passed literally; do not construct a shell command.', { script: stringProp('Workspace-relative scripts/*.js, *.mjs, or *.cjs path'), args: arrayProp('Literal command arguments') }, ['script']),
+  tool('image.inspect', 'Inspect a workspace image and return its dimensions, format, channels, and a bounded visual preview.', { path: stringProp('Workspace-relative PNG, JPEG, or WebP path') }, ['path']),
   tool('project.run_tests', 'Run only the test script declared by the workspace package.json.', {}),
   tool('project.run_build', 'Run only the build script declared by the workspace package.json.', {}),
   tool('project.run_typecheck', 'Run only the typecheck script declared by the workspace package.json.', {}),
@@ -93,6 +95,7 @@ export interface AgentRuntimeProfile {
   id: string;
   name: string;
   revision: number;
+  stage?: AgentStage;
   modelId?: string;
   instructions?: string;
   enabledToolIds?: string[];
@@ -273,7 +276,7 @@ function numberProp(description: string) { return { type: 'number', description 
 function arrayProp(description: string) { return { type: 'array', description, items: { type: 'string' } }; }
 
 export function toolsFor(settings: WorkspaceSettings, references: boolean, agent?: AgentRuntimeProfile) {
-  return TOOL_BROKER.compile({ stage: 'coder', grantedToolIds: agent?.enabledToolIds }).flatMap((item) => {
+  return TOOL_BROKER.compile({ stage: agent?.stage || 'coder', grantedToolIds: agent?.enabledToolIds }).flatMap((item) => {
     if (item.name === 'delegate_media_task' && !settings.codingAgent.mediaGeneration) return [];
     if (settings.codingAgent.dependencies === 'existing-only' && item.name === 'install_dependencies') return [];
     if (settings.codingAgent.validation !== 'standard' && item.name === 'inspect_preview') return [];
@@ -290,7 +293,7 @@ function allowedMediaKinds(agent?: AgentRuntimeProfile): MediaJobKind[] {
 }
 
 export function assertToolPermission(agent: AgentRuntimeProfile | undefined, name: string, args: any) {
-  TOOL_BROKER.authorize({ stage: 'coder', grantedToolIds: agent?.enabledToolIds }, name, args);
+  TOOL_BROKER.authorize({ stage: agent?.stage || 'coder', grantedToolIds: agent?.enabledToolIds }, name, args);
 }
 
 function systemFor(settings: WorkspaceSettings, agent?: AgentRuntimeProfile) {
@@ -301,15 +304,18 @@ function systemFor(settings: WorkspaceSettings, agent?: AgentRuntimeProfile) {
       : 'Mixed mode is active. Use semantic DOM for ordinary layout, text, forms, and controls; use HTML5 canvas for spatial or frame-driven content. Any canvas layers must use a data-cowork-canvas-primary canvas and the window.coworkCanvas adapter contract with stable layer IDs.';
   const dependencies = settings.codingAgent.dependencies === 'existing-only' ? 'Do not add, remove, or change package dependencies.' : 'New dependencies are allowed when materially useful.';
   const media = settings.codingAgent.mediaGeneration
-    ? 'Media generation is enabled. Delegate explicitly requested new media assets to the Media Agent with delegate_media_task; never treat a workspace canvas change as media generation.'
+    ? 'Media generation is enabled. Delegate explicitly requested new media assets to the Media Agent with delegate_media_task. A media-only request authorizes creation of the asset, not edits that display or integrate it in the application. Never treat a workspace canvas change as media generation.'
     : 'Do not generate new images or animations; reuse existing assets.';
   const validation = `The independent validator owns routine verification in ${settings.codingAgent.validation} mode. Do not run tests, builds, linters, typechecks, or final preview inspection.`;
   const custom = agent?.instructions?.trim() ? `\n\nConfigured worker identity: ${agent.name}\nAdditional instructions:\n${agent.instructions.trim()}` : '';
-  return `${BASE_SYSTEM}\n\nActive workspace settings:\n- ${mode}\n- ${dependencies}\n- ${media}\n- ${validation}${custom}`;
+  const base = agent?.stage === 'media'
+    ? `You are the configured Media Agent in a local cowork application. Own standalone image, sprite, symbol, video, animation, music, audio, and sound-effect work. Follow assigned skill instructions exactly. Use only the granted media and inspection tools. Do not edit application source, place assets into pages or HTML5 canvases, or invent code-integration work. Generated and processed outputs belong under assets/generated or assets/processed. When a skill names an existing script under scripts/, use run_node_script with literal arguments. Inspect relevant inputs before acting, verify outputs as far as the granted tools allow, and report durable workspace-relative paths.\n\nPython is unavailable; use the checked-in Node utilities. A media job returning a stable path may still be processing asynchronously, so report its job state accurately.`
+    : CODING_AGENT_SYSTEM;
+  return `${base}\n\nActive workspace settings:\n- ${mode}\n- ${dependencies}\n- ${media}\n- ${validation}${custom}`;
 }
 
 const READ_ONLY = new Set(['locate_code', 'read_files', 'list_reference_files', 'read_reference_file', 'search_reference_files']);
-function isMutation(name: string) { return ['apply_edits', 'copy_reference_file', 'run_command', 'install_dependencies', 'delegate_media_task', 'remove_image_background', 'extract_image_regions'].includes(name); }
+function isMutation(name: string) { return ['apply_edits', 'copy_reference_file', 'run_command', 'run_node_script', 'install_dependencies', 'delegate_media_task', 'remove_image_background', 'extract_image_regions'].includes(name); }
 export async function executeCalls<T extends { call: { name: string } }, R>(items: T[], execute: (item: T) => Promise<R>) {
   const output: R[] = new Array(items.length); let index = 0;
   while (index < items.length) {

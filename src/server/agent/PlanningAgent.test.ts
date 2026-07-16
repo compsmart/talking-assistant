@@ -4,6 +4,7 @@ import { PLANNING_SEGMENT_LIMIT, PLANNING_SYSTEM, PLANNING_TOOL_NAMES } from './
 describe('planning agent boundaries', () => {
   it('exposes discovery tools without workspace mutation capabilities', () => {
     expect(PLANNING_TOOL_NAMES).toEqual(expect.arrayContaining(['list_files', 'search_files', 'locate_code', 'read_files']));
+    expect(PLANNING_TOOL_NAMES).toContain('run_node_script');
     expect(PLANNING_TOOL_NAMES).not.toEqual(expect.arrayContaining(['apply_edits', 'run_command', 'install_dependencies', 'copy_reference_file', 'generate_image']));
   });
 

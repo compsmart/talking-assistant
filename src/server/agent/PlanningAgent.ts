@@ -10,8 +10,8 @@ export const PLANNING_SYSTEM = `You are the read-only software architect for a l
 
 Hard boundaries:
 - You cannot create, edit, delete, move, or copy project files.
-- You cannot run shell commands, install dependencies, inspect a live preview, or generate media.
-- Use only the provided list, search, locate, and read tools. Never ask for a mutation tool.
+- You cannot run shell commands, install dependencies, inspect a live preview, or generate media. You may run an existing user-defined Node utility beneath scripts/ with run_node_script; the workspace is mounted read-only for that execution.
+- Use only the provided list, search, locate, read, and read-only Node-script tools. Never ask for a mutation tool.
 - The server will persist your final Markdown response; do not attempt to save it yourself.
 
 Planning process:
@@ -30,6 +30,7 @@ const TOOLS = [
   tool('list_reference_files', 'List files in a user-authorized read-only source workspace.', { workspace: stringProp('Exact workspace name'), path: stringProp('Relative directory, default .') }, ['workspace']),
   tool('read_reference_file', 'Read a text file from a user-authorized source workspace.', { workspace: stringProp('Exact workspace name'), path: stringProp('Relative file path'), startLine: numberProp('First line'), endLine: numberProp('Last line') }, ['workspace', 'path']),
   tool('search_reference_files', 'Search a user-authorized source workspace.', { workspace: stringProp('Exact workspace name'), query: stringProp('Text to find'), path: stringProp('Relative root, default .') }, ['workspace', 'query']),
+  tool('run_node_script', 'Run an existing user-defined Node.js utility beneath scripts/ in a read-only, resource-limited, network-disabled workspace sandbox.', { script: stringProp('Workspace-relative scripts/*.js, *.mjs, or *.cjs path'), args: { type: 'array', items: { type: 'string' } } }, ['script']),
 ];
 export const PLANNING_TOOL_NAMES = TOOLS.map((item) => item.name);
 const TOOL_BROKER = new ToolBroker(new ToolCatalog(), TOOLS as any);

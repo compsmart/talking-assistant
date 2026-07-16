@@ -2,6 +2,9 @@ import type { MediaJobRequest, MediaJobSnapshot, MediaStageName } from '../../sh
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> { const response = await fetch(url, { cache: 'no-store', ...init }); if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `Media request failed (${response.status})`); return response.json(); }
 export function createMediaJob(request: MediaJobRequest) { return json<MediaJobSnapshot>('/api/media-jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }); }
+export function removeImageBackground(request: Record<string, unknown>) { return json<any>('/api/media-tools/remove-background', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }); }
+export function extractImageRegions(request: Record<string, unknown>) { return json<any>('/api/media-tools/extract-regions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }); }
+export function runNodeScript(request: { script: string; args?: string[] }) { return json<any>('/api/media-tools/run-script', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }); }
 export function listMediaJobs() { return json<MediaJobSnapshot[]>('/api/media-jobs'); }
 export function getMediaJob(id: string) { return json<MediaJobSnapshot>(`/api/media-jobs/${encodeURIComponent(id)}`); }
 export function cancelMediaJob(id: string) { return json(`/api/media-jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }); }

@@ -10,16 +10,23 @@ export class PcmPlayer {
     this.nextTime = 0;
     this.sources = new Set();
     this.gain = null;
+    this.muted = false;
   }
 
   ensureContext() {
     if (!this.ctx) {
       this.ctx = new AudioContext({ sampleRate: this.sampleRate });
       this.gain = this.ctx.createGain();
+      this.gain.gain.value = this.muted ? 0 : 1;
       this.gain.connect(this.ctx.destination);
     }
     if (this.ctx.state === 'suspended') this.ctx.resume();
     return this.ctx;
+  }
+
+  setMuted(muted) {
+    this.muted = Boolean(muted);
+    if (this.gain && this.ctx) this.gain.gain.setValueAtTime(this.muted ? 0 : 1, this.ctx.currentTime);
   }
 
   // samples: Float32Array. Returns the ctx-clock time the chunk will start.
@@ -48,5 +55,4 @@ export class PcmPlayer {
   get time() { return this.ctx ? this.ctx.currentTime : 0; }
   get playing() { return this.ctx !== null && this.nextTime > this.ctx.currentTime && this.sources.size > 0; }
 }
-
 

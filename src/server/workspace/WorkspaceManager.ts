@@ -64,9 +64,9 @@ export class WorkspaceManager {
 
   async prepareWorkspace(context: WorkspaceContext) { return this.ensureInitialRelease(context); }
 
-  async runInSandbox(command: string, network = false, timeout = 120_000, root = this.context.draftDir): Promise<CommandResult> {
+  async runInSandbox(command: string, network = false, timeout = 120_000, root = this.context.draftDir, readOnly = false, hardened = false): Promise<CommandResult> {
     if (!this.dockerAvailable) return { code: 1, stdout: '', stderr: 'Docker Desktop is not running. Start Docker Desktop and restart the cowork server.' };
-    return run('docker', sandboxRunArgs(root, command, network), { timeout });
+    return run('docker', sandboxRunArgs(root, command, network, readOnly, hardened), { timeout });
   }
 
   async validate(taskId: string, changedFiles: FileReference[] = [], mode: WorkspaceMode = 'mixed', root = this.context.draftDir): Promise<CheckResult[]> {
@@ -363,8 +363,10 @@ export class WorkspaceManager {
   private emitCommand(taskId: string, result: CommandResult) { if (result.stdout.trim()) void this.activity.emit(taskId, 'stdout', 'validate', result.stdout.trim()); if (result.stderr.trim()) void this.activity.emit(taskId, 'stderr', 'validate', result.stderr.trim()); }
 }
 
-export function sandboxRunArgs(draftDir: string, command: string, network = false) {
-  return ['run', '--rm', '--cpus', '2', '--memory', '2g', '--pids-limit', '256', '--network', network ? 'bridge' : 'none', '-v', `${draftDir}:/workspace`, '-w', '/workspace', config.sandboxImage, 'sh', '-lc', command];
+export function sandboxRunArgs(draftDir: string, command: string, network = false, readOnly = false, hardened = false) {
+  return ['run', '--rm', '--cpus', '2', '--memory', '2g', '--pids-limit', '256', '--network', network ? 'bridge' : 'none',
+    ...(hardened ? ['--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m'] : []),
+    '-v', `${draftDir}:/workspace${readOnly ? ':ro' : ''}`, '-w', '/workspace', config.sandboxImage, 'sh', '-lc', command];
 }
 
 export function shouldRemovePreviousContainer(previous: string, current: string) { return !!previous && previous !== current; }

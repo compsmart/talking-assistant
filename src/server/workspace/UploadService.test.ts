@@ -41,7 +41,8 @@ describe('workspace media uploads', () => {
     expect(parseAccept()).toBe('media');
     expect(parseAccept('media')).toBe('media');
     expect(parseAccept('image')).toBe('image');
-    expect(() => parseAccept('document')).toThrow(/media or image/);
+    expect(parseAccept('file')).toBe('file');
+    expect(() => parseAccept('document')).toThrow(/media, image, or file/);
   });
 
   it('allows only existing, visible workspace directories', async () => {
@@ -65,6 +66,16 @@ describe('workspace media uploads', () => {
     expect(records[0]).toMatchObject({ path: 'public/art/logo.svg', originalName: 'logo.svg', mimeType: 'image/svg+xml' });
     expect(await readFile(join(root, 'public', 'art', 'logo.svg'), 'utf8')).toBe(svg);
     expect(JSON.parse(await readFile(join(root, 'uploads', 'manifest.json'), 'utf8'))).toMatchObject([{ path: 'public/art/logo.svg' }]);
+  });
+
+  it('stores an arbitrary external file unchanged in the selected File Manager folder', async () => {
+    const root = await workspace(); const jobs = join(root, '.jobs'); await mkdir(join(root, 'docs'), { recursive: true }); await mkdir(jobs);
+    const service = new UploadService({ active: () => ({ draftDir: root, mediaJobsDir: jobs }) } as any);
+    const source = Buffer.from('local notes\n');
+    const request = multipartRequest([{ name: 'destination', value: 'docs' }, { name: 'accept', value: 'file' }], 'Notes.TXT', 'text/plain', source);
+    const records = await service.receive(request);
+    expect(records[0]).toMatchObject({ path: 'docs/notes.txt', originalName: 'Notes.TXT', mimeType: 'text/plain' });
+    expect(await readFile(join(root, 'docs', 'notes.txt'))).toEqual(source);
   });
 });
 

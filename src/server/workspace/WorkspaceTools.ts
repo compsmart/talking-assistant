@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve, sep } from 'node:path';
 import { Worker } from 'node:worker_threads';
+import sharp from 'sharp';
 import type { ActivityHub } from '../activity.js';
 import type { WorkspaceManager } from './WorkspaceManager.js';
 import type { FileReference, WorkspaceSettings } from '../../shared/protocol.js';
@@ -51,6 +52,7 @@ export class WorkspaceTools {
       case 'datetime': result = dateTime(args); break;
       case 'regex.test': result = await regexTest(args); break;
       case 'content.hash': result = hashContent(args); break;
+      case 'image.inspect': result = await this.inspectImage(args.path); break;
       case 'install_dependencies': result = await this.runCommand(taskId, args.command || 'npm install --no-audit --no-fund', true); break;
       case 'inspect_preview': result = await this.workspace.inspectDraft(taskId, 'mixed', this.root()); break;
       case 'generate_image': if (!this.assets) throw new Error('Media generation is unavailable.'); result = await this.assets.generateImage(taskId, args, cancelled); break;
@@ -58,6 +60,7 @@ export class WorkspaceTools {
       case 'delegate_media_task': if (!this.mediaJobs) throw new Error('Media Agent is unavailable.'); result = await this.mediaJobs.create({ ...args, parentRunId: taskId }, this.executionRoot); break;
       case 'remove_image_background': if (!this.images) throw new Error('Image processing is unavailable.'); result = await this.images.removeBackground(args, this.root()); break;
       case 'extract_image_regions': if (!this.images) throw new Error('Image processing is unavailable.'); result = await this.images.extractRegions(args, this.root()); break;
+      case 'run_node_script': result = await this.runNodeScript(taskId, args, phase); break;
       default: throw new Error(`Unknown workspace tool: ${name}`);
     }
     await this.activity.emit(taskId, 'tool_result', phase, `${name}: ${formatResult(redactValue(result, redactions))}`, { name });
@@ -77,6 +80,14 @@ export class WorkspaceTools {
     const source = await readFile(resolve(this.root(), 'package.json'), 'utf8').catch(() => '{}');
     const value = JSON.parse(source); const fields = ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'];
     return createHash('sha256').update(JSON.stringify(Object.fromEntries(fields.map((field) => [field, value[field] || {}])))).digest('hex');
+  }
+
+  private async inspectImage(pathValue: unknown) {
+    const path = String(pathValue || ''); const source = await safePath(this.root(), path, true);
+    const metadata = await sharp(source).metadata();
+    if (!['png', 'jpeg', 'webp'].includes(metadata.format || '')) throw new Error('image.inspect supports PNG, JPEG, and WebP files.');
+    const preview = await sharp(source).resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 86 }).toBuffer();
+    return { path, width: metadata.width, height: metadata.height, format: metadata.format, channels: metadata.channels, hasAlpha: metadata.hasAlpha, screenshotBase64: preview.toString('base64') };
   }
 
   private async runPackageScript(taskId: string, script: string) {
@@ -251,6 +262,23 @@ export class WorkspaceTools {
     return result;
   }
 
+  private async runNodeScript(taskId: string, args: any, phase: string) {
+    const script = String(args?.script || '').replaceAll('\\', '/');
+    if (!/^scripts\/(?:[^/]+\/)*[^/]+\.(?:js|mjs|cjs)$/.test(script) || script.split('/').includes('..')) {
+      throw new Error('Media scripts must be workspace-relative .js, .mjs, or .cjs files beneath scripts/.');
+    }
+    await safePath(this.root(), script, true);
+    const values = Array.isArray(args?.args) ? args.args.map(String) : [];
+    if (values.length > 100 || values.some((value: string) => value.length > 4096 || value.includes('\0'))) throw new Error('Media script arguments exceed the allowed limits.');
+    const command = ['node', '--', script, ...values].map(shellArgument).join(' ');
+    const readOnly = ['planning', 'research', 'review'].includes(phase);
+    const result = await this.workspace.runInSandbox(command, false, 180_000, this.root(), readOnly, true);
+    if (result.stdout.trim()) await this.activity.emit(taskId, 'stdout', phase, result.stdout.trim());
+    if (result.stderr.trim()) await this.activity.emit(taskId, 'stderr', phase, result.stderr.trim());
+    if (result.code) throw new Error(`Node script failed with exit code ${result.code}: ${result.stderr || result.stdout}`);
+    return result;
+  }
+
   private reference(value: unknown, allowed: string[]) {
     const requested = String(value || '').normalize('NFKC').toLocaleLowerCase();
     const context = allowed.map((id) => this.registry.get(id)).find((item) => item.id === value || item.name.normalize('NFKC').toLocaleLowerCase() === requested);
@@ -305,6 +333,7 @@ function unique<T>(values: T[]) { return [...new Set(values)]; }
 function isTextPath(path: string) { const normalized = path.toLowerCase(); const dot = normalized.lastIndexOf('.'); return dot < 0 || TEXT_EXTENSIONS.has(normalized.slice(dot)); }
 function objectiveKeywords(value: string) { return unique(String(value).toLowerCase().match(/[a-z][a-z0-9_-]{3,}/g) || []).filter((word) => !['change', 'make', 'with', 'from', 'that', 'this', 'please', 'should'].includes(word)).slice(0, 6); }
 function truncateUtf8(value: string, bytes: number) { if (Buffer.byteLength(value) <= bytes) return value; let end = Math.min(value.length, bytes); while (end > 0 && Buffer.byteLength(value.slice(0, end)) > bytes) end -= Math.max(1, Math.ceil((Buffer.byteLength(value.slice(0, end)) - bytes) / 2)); return value.slice(0, end); }
+function shellArgument(value: string) { return `'${String(value).replaceAll("'", `'"'"'`)}'`; }
 
 function calculate(expression: string) {
   if (!expression || expression.length > 4_096 || !/^[\d\s.eE+*/%^()-]+$/.test(expression)) throw new Error('Calculator expression contains unsupported input.');

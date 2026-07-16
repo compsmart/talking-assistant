@@ -11,7 +11,7 @@ describe('Gemini Live system prompt', () => {
   it('appends personality instructions after the core cowork instructions', () => {
     const assistant = { ...DEFAULT_ASSISTANT_SETTINGS, personalityPrompt: 'Talk like an angry pirate.' };
     const prompt = systemPrompt(DEFAULT_CLIENT_SETTINGS, assistant);
-    expect(prompt).toContain('Delegate substantial work with submit_work');
+    expect(prompt).toContain('standalone media work with submit_work');
     expect(prompt).toContain('never acknowledge, name, or refer to an assistant or coordinator');
     expect(prompt).toMatch(/USER-CONFIGURED PERSONALITY AND SPEAKING STYLE\]\nTalk like an angry pirate\.$/);
   });
@@ -28,14 +28,18 @@ describe('Gemini Live system prompt', () => {
     const names = declarations.map((item: any) => item.name);
     const opener = declarations.find((item: any) => item.name === 'open_ui_component');
     const submit = declarations.find((item: any) => item.name === 'submit_work');
-    expect(names).toEqual(expect.arrayContaining(['open_ui_component', 'generate_image_asset', 'submit_work', 'update_work', 'cancel_work', 'get_work_status']));
+    expect(names).toEqual(expect.arrayContaining(['open_ui_component', 'submit_work', 'update_work', 'cancel_work', 'get_work_status']));
+    expect(names).not.toEqual(expect.arrayContaining(['generate_image_asset', 'remove_image_background', 'extract_image_regions', 'run_node_script']));
     expect(names).not.toContain('generate_canvas_image');
     expect(opener.parameters.properties.component.enum).toEqual(['file_manager', 'image_editor']);
     expect(submit.parameters.properties).toHaveProperty('includeWorkspacePreview');
     expect(submit.parameters.properties).not.toHaveProperty('includeCanvasImage');
+    expect(submit.description).toMatch(/appropriate configured agent and its assigned skills/i);
     expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('While the Image Editor is open, your image input is its current static composition');
     expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('Work starts return immediately');
     expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('always in first person');
+    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toMatch(/standalone image generation, background removal, sprite extraction.*through submit_work/i);
+    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('does not authorize inserting it into the workspace page');
   });
 
   it('requires clarification before acting on an unresolved canvas reference', () => {
@@ -45,10 +49,10 @@ describe('Gemini Live system prompt', () => {
     expect(prompt).toContain('call no mutating, editor-opening, or generation tool until the user answers');
   });
 
-  it('keeps the UI opener but hides image generation when media generation is disabled', () => {
+  it('never exposes direct media execution tools to Live', () => {
     const settings = { ...DEFAULT_CLIENT_SETTINGS, codingAgent: { ...DEFAULT_CLIENT_SETTINGS.codingAgent, mediaGeneration: false } };
     const names = liveSetup(settings, DEFAULT_ASSISTANT_SETTINGS).tools[0].functionDeclarations.map((item: any) => item.name);
-    expect(names).toContain('open_ui_component'); expect(names).not.toContain('generate_image_asset');
+    expect(names).toContain('open_ui_component'); expect(names).not.toEqual(expect.arrayContaining(['generate_image_asset', 'remove_image_background', 'extract_image_regions', 'run_node_script']));
   });
 });
 

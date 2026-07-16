@@ -17,7 +17,8 @@ export class ConcurrentCodingRunner {
     const task = await this.git.create(work.workspaceId, attemptId); const tools = this.baseTools.scoped(task.root); const agent = new CodingAgent(tools, this.activity);
     const cancelled = () => this.cancelled.has(attemptId); const settings = this.settings.get(work.workspaceId); const before = await tools.manifest();
     try {
-      await this.activity.emit(attemptId, 'status', 'coding', `Implementing in isolated branch ${task.branch}: ${work.request.objective}`);
+      const phase = agentProfile?.stage === 'media' ? 'media' : 'coding';
+      await this.activity.emit(attemptId, 'status', phase, `${phase === 'media' ? 'Producing media' : 'Implementing'} in isolated branch ${task.branch}: ${work.request.objective}`);
       const context = await tools.buildTaskContext(work.request); const canvas = work.request.includeCanvasImage ? await this.workspace.captureCurrentCanvas().catch(() => undefined) : undefined;
       agent.beginTask();
       const performed = await agent.perform(attemptId, promptFor(work.request, settings, context.text, [], approvedPlanContent), cancelled, settings, canvas, referenceWorkspaceIds, { objective: work.request.objective, criteria: work.request.successCriteria, agent: agentProfile });

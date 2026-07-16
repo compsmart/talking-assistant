@@ -5,7 +5,7 @@ import type { AgentConfigService } from '../agents/AgentConfigService.js';
 import type { AgentRuntimeProfile } from '../agent/CodingAgent.js';
 import { AgentRouter, type AgentRoutingDecision, type RoutableAgentProfile } from './AgentRouter.js';
 
-export interface CoordinationDecision { action: 'code' | 'plan' | 'duplicate'; duplicateOf?: string; writeScope: string[]; reason: string }
+export interface CoordinationDecision { action: 'code' | 'media' | 'plan' | 'duplicate'; duplicateOf?: string; writeScope: string[]; reason: string }
 export type AgentSelectionDecision =
   | { status: 'selected'; agent: AgentRuntimeProfile; reason: string; candidates: Array<{ id: string; name: string; score: number }> }
   | { status: 'tie'; reason: string; candidates: Array<{ id: string; name: string; score: number }> }
@@ -14,11 +14,13 @@ export type AgentSelectionDecision =
 const SYSTEM = `You are the hidden orchestration Assistant for a local coding application. You never address the user and never present yourself as a conversational identity. Decide how one durable user work item should be routed.
 
 Return JSON only:
-{"action":"code|duplicate","duplicateOf":"optional active task id","writeScope":["likely glob"],"reason":"short operational reason"}
+{"action":"code|media|duplicate","duplicateOf":"optional active task id","writeScope":["likely glob"],"reason":"short operational reason"}
 
 Rules:
 - duplicate only when a non-terminal task has the same intended deliverable, not merely a related topic.
-- route every non-duplicate automatic request to code, including architectural work, uncertain debugging, migrations, redesigns, dependency changes, and broad work.
+- route standalone image generation or manipulation, sprite/symbol extraction, video, animation, music, audio, and sound-effect work to media.
+- route requests that explicitly integrate media into application code, pages, components, games, or an HTML5 canvas to code.
+- route every other non-duplicate automatic request to code, including architectural work, uncertain debugging, migrations, redesigns, dependency changes, and broad work.
 - planning is handled before this decision only when the user explicitly selects plan_first or plan_only; never infer or return plan.
 - writeScope is advisory and must be conservative; use **/* when the owning paths cannot be known from the request.
 - do not write code, claim completion, or explain this decision to the user.`;
@@ -28,8 +30,14 @@ export class AssistantCoordinator {
   constructor(private readonly agents?: AgentConfigService) { if (config.geminiKey) this.client = new GoogleGenAI({ apiKey: config.geminiKey }); }
 
   async coordinate(work: WorkItemSnapshot, active: WorkItemSnapshot[]): Promise<CoordinationDecision> {
-    if (work.strategy === 'direct' || work.plan) return { action: 'code', writeScope: ['**/*'], reason: 'The task is explicitly implementation-ready.' };
     if (work.strategy === 'plan_first' || work.strategy === 'plan_only') return { action: 'plan', writeScope: [], reason: 'The task explicitly requires planning.' };
+    if (work.plan) return { action: 'code', writeScope: ['**/*'], reason: 'The approved implementation plan is ready for coding.' };
+    const duplicate = active.find((item) => item.id !== work.id && normalize(item.request.objective) === normalize(work.request.objective) && !['completed', 'failed', 'cancelled', 'superseded'].includes(item.status));
+    if (duplicate) return { action: 'duplicate', duplicateOf: duplicate.id, writeScope: [], reason: 'An equivalent task is already active.' };
+    if (isStandaloneMediaObjective(work.request.objective)) return { action: 'media', writeScope: ['assets/generated/**', 'assets/processed/**'], reason: 'Standalone media work routes to the configured Media Agent.' };
+    if (work.strategy === 'direct') return isStandaloneMediaObjective(work.request.objective)
+      ? { action: 'media', writeScope: ['assets/generated/**', 'assets/processed/**'], reason: 'The explicitly ready task is standalone media work.' }
+      : { action: 'code', writeScope: ['**/*'], reason: 'The task is explicitly implementation-ready.' };
     if (!this.client) return fallback(work, active);
     try {
       const response = await this.client.models.generateContent({
@@ -38,9 +46,9 @@ export class AssistantCoordinator {
         config: { systemInstruction: SYSTEM, responseMimeType: 'application/json', temperature: 0 },
       } as any);
       const parsed = JSON.parse(String((response as any).text || '{}'));
-      if (!['code', 'duplicate'].includes(parsed.action)) throw new Error('Invalid Assistant action.');
+      if (!['code', 'media', 'duplicate'].includes(parsed.action)) throw new Error('Invalid Assistant action.');
       if (parsed.action === 'duplicate' && !active.some((item) => item.id === parsed.duplicateOf && item.id !== work.id)) throw new Error('Invalid duplicate target.');
-      return { action: parsed.action, duplicateOf: parsed.duplicateOf, writeScope: Array.isArray(parsed.writeScope) && parsed.writeScope.length ? parsed.writeScope.map(String).slice(0, 20) : parsed.action === 'code' ? ['**/*'] : [], reason: String(parsed.reason || 'Assistant routing decision.') };
+      return { action: parsed.action, duplicateOf: parsed.duplicateOf, writeScope: Array.isArray(parsed.writeScope) && parsed.writeScope.length ? parsed.writeScope.map(String).slice(0, 20) : parsed.action === 'code' ? ['**/*'] : parsed.action === 'media' ? ['assets/generated/**', 'assets/processed/**'] : [], reason: String(parsed.reason || 'Assistant routing decision.') };
     } catch { return fallback(work, active); }
   }
 
@@ -75,7 +83,7 @@ export class AssistantCoordinator {
     }, routerProfiles, states);
     if (snapshot.routing.mode === 'priority_first' && decision.status === 'tie') decision = { status: 'selected', selected: decision.candidates[0], candidates: decision.candidates, excluded: decision.excluded, preferred: false, reason: `Selected ${decision.candidates[0].name} by strict priority policy.` };
     if (snapshot.routing.mode === 'ask_on_overlap' && decision.status === 'selected' && !decision.preferred && decision.candidates.length > 1) decision = { status: 'tie', candidates: decision.candidates, excluded: decision.excluded, reason: 'Multiple eligible agents overlap and the routing policy requires a user choice.' };
-    const selection = selectionFrom(decision, profiles);
+    const selection = selectionFrom(decision, profiles, stage);
     if (selection.status === 'selected') {
       const agentId = selection.agent.id;
       selection.agent.modelReadableSecrets = this.agents.modelReadableSecrets(agentId, work.workspaceId);
@@ -108,20 +116,28 @@ function effectiveProfile(profile: AgentProfile, snapshot: ReturnType<AgentConfi
   return { ...profile, enabled: override?.enabled ?? profile.enabled, capabilities: [...new Set([...profile.capabilities, ...skills.flatMap((skill) => skill.capabilities)])], toolIds: override?.toolIds?.filter((id) => profile.toolIds.includes(id)) || profile.toolIds, skillIds, contextIds, secretGrantIds: override?.secretGrantIds || profile.secretGrantIds, priority: override?.priority ?? profile.priority, instructions: [profile.instructions, additions].filter(Boolean).join('\n\n') };
 }
 
-function selectionFrom(decision: AgentRoutingDecision, profiles: AgentProfile[]): AgentSelectionDecision {
+function selectionFrom(decision: AgentRoutingDecision, profiles: AgentProfile[], stage: AgentStage): AgentSelectionDecision {
   if (decision.status === 'no_eligible') return { status: 'no_eligible', reason: decision.reason, candidates: [] };
   const candidates = decision.candidates.map((item) => ({ id: item.id, name: item.name, score: item.score.total }));
   if (decision.status === 'tie') return { status: 'tie', reason: decision.reason, candidates };
   const profile = profiles.find((item) => item.id === decision.selected.id)!;
-  return { status: 'selected', reason: decision.reason, candidates, agent: { id: profile.id, name: profile.name, revision: profile.revision, modelId: profile.model, instructions: profile.instructions, enabledToolIds: profile.toolIds } };
+  return { status: 'selected', reason: decision.reason, candidates, agent: { id: profile.id, name: profile.name, revision: profile.revision, stage, modelId: profile.model, instructions: profile.instructions, enabledToolIds: profile.toolIds } };
 }
 
-function legacyProfile(stage: AgentStage): AgentRuntimeProfile { return { id: `builtin-${stage}`, name: stage[0].toUpperCase() + stage.slice(1), revision: 1 }; }
+function legacyProfile(stage: AgentStage): AgentRuntimeProfile { return { id: `builtin-${stage}`, name: stage[0].toUpperCase() + stage.slice(1), revision: 1, stage }; }
 
 function fallback(work: WorkItemSnapshot, active: WorkItemSnapshot[]): CoordinationDecision {
   const normalized = normalize(work.request.objective);
   const duplicate = active.find((item) => item.id !== work.id && normalize(item.request.objective) === normalized && !['completed', 'failed', 'cancelled', 'superseded'].includes(item.status));
   if (duplicate) return { action: 'duplicate', duplicateOf: duplicate.id, writeScope: [], reason: 'An equivalent task is already active.' };
+  if (isStandaloneMediaObjective(work.request.objective)) return { action: 'media', writeScope: ['assets/generated/**', 'assets/processed/**'], reason: 'Standalone media work routes to the configured Media Agent.' };
   return { action: 'code', writeScope: ['**/*'], reason: 'Automatic work routes directly to implementation; planning is user-requested only.' };
+}
+export function isStandaloneMediaObjective(objective: string) {
+  const text = objective.normalize('NFKC').toLocaleLowerCase();
+  const mediaAction = /\b(generate|create|design|draw|illustrate|render|produce|edit|manipulate|transform|retouch|crop|resize|upscale|remove(?:\s+the)?\s+background|extract|isolate|slice|split)\b/.test(text);
+  const mediaSubject = /\b(image|images|photo|photos|picture|pictures|illustration|illustrations|icon|icons|symbol|symbols|sprite|sprites|texture|textures|background|backgrounds|video|videos|animation|animations|audio|music|sound(?:\s+effect)?s?)\b/.test(text);
+  const explicitIntegration = /\b(add|place|insert|integrate|embed|display|show|wire|hook|use|replace|map)\b[^.\n]{0,100}\b(page|site|app|application|component|screen|layout|reel|game|canvas|workspace|code)\b|\b(?:as|for)\s+(?:the\s+)?(?:page|site|app|application|component|screen|layout|canvas)\b|\b(?:gallery|component)\b/.test(text);
+  return mediaAction && mediaSubject && !explicitIntegration;
 }
 function normalize(value: string) { return value.normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase(); }
