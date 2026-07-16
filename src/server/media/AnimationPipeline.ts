@@ -42,7 +42,7 @@ export async function removeEdgeConnectedBackground(source: string, destination:
     // Include bright, green-dominant antialias pixels just outside the strict
     // tolerance. This removes the one-pixel neon fringe without eating dark
     // green clothing or other intentional subject interiors.
-    const stageFringe = green > 140 && green > red + 60 && green > blue + 60 && (!settings.edgeConnected || distance <= settings.tolerance + 40);
+    const stageFringe = settings.edgeConnected && green > 140 && green > red + 60 && green > blue + 60 && distance <= settings.tolerance + 40;
     return distance <= settings.tolerance || stageFringe;
   };
   const add = (index: number) => { if (!matte[index] && matches(index)) { matte[index] = 1; queue[tail++] = index; } };

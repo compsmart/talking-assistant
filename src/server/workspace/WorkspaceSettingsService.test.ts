@@ -24,5 +24,9 @@ describe('selection bridge contract', () => {
     expect(selectionBridge).toContain('window.coworkCanvas');
     expect(selectionBridge).toContain("kind: 'canvas'");
     expect(selectionBridge).toContain('cowork:canvas-status');
+    expect(selectionBridge).toContain('locatorStrategy: locator.strategy');
+    expect(selectionBridge).toContain('xpath: xpathFor(element)');
+    expect(selectionBridge).toContain('domPath: domPathFor(element)');
+    expect(selectionBridge).not.toContain('parts.length >= 7');
   });
 });

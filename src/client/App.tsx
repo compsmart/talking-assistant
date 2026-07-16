@@ -1,17 +1,17 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActivityEvent, AgentRunSnapshot, AssistantProfile, AssistantSettings, AvatarAppearanceSettings, PlanResult, TaskResult, TaskSnapshot, UiTheme, UiThemeProfile, UiThemeProfileResponse, WorkItemSnapshot, WorkspaceCatalog, WorkspaceMode, WorkspaceReferenceGrant, WorkspaceSelection, WorkspaceSettings } from '../shared/protocol';
+import type { ActivityEvent, AgentRunSnapshot, AssistantProfile, AssistantSettings, AvatarAppearanceSettings, MediaJobSnapshot, PlanResult, TaskResult, TaskSnapshot, UiTheme, UiThemeProfile, UiThemeProfileResponse, WorkItemSnapshot, WorkspaceCatalog, WorkspaceMode, WorkspaceReferenceGrant, WorkspaceSelection, WorkspaceSettings } from '../shared/protocol';
 import { AvatarPanel } from './components/AvatarPanel';
 import { WorkspaceStage } from './components/WorkspaceStage';
 import { ChatTray } from './components/ChatTray';
 import { AgentTerminal } from './components/AgentTerminal';
 import { WorkCenter } from './components/WorkCenter';
 import { IconButton } from './components/IconButton';
-import { LiveClient, type LiveFunctionCall, type LiveStatus } from './live/LiveClient';
+import { LiveClient, speechSafeText, type LiveActivity, type LiveFunctionCall, type LiveStatus } from './live/LiveClient';
 import { MicrophoneInput } from './live/MicrophoneInput';
 import { CanvasVision } from './live/CanvasVision';
 import { SurfaceVision } from './live/SurfaceVision';
 import { cancelPlan, cancelTask, continuePlan, createPlan, createTask, executePlan, getActiveRun, getPendingPlan, watchAgentRun } from './agent/TaskClient';
-import { approveWorkPlan, cancelWork, getWork, listWork, submitWork, updateWork, watchWork as watchWorkFeed } from './agent/WorkClient';
+import { answerWorkQuestion, approveWorkPlan, cancelWork, delegateToAssistant, listWork, watchWork as watchWorkFeed } from './agent/WorkClient';
 import type { AvatarController } from './avatar/AvatarController';
 import { editFiles, listFiles, readFile, searchFiles, uploadFiles } from './files/FileClient';
 import { WorkspaceSettingsPanel } from './components/WorkspaceSettingsPanel';
@@ -28,6 +28,7 @@ import { deleteCanvasDocument } from './canvas/CanvasStore';
 import { ActivityPanel } from './components/ActivityPanel';
 import { getActivity, recordClientError, watchActivity } from './activity/ActivityClient';
 import { listMediaJobs } from './media/MediaClient';
+import { deriveMediaAgentProgress } from './media/mediaProgress';
 import { applyUiTheme, getUiThemeProfile, saveUiThemeProfile } from './settings/UiThemeClient';
 import { DEFAULT_UI_THEME_PROFILE, activeUiTheme, allUiThemes } from '../shared/uiThemes';
 
@@ -64,6 +65,7 @@ export function App() {
   const canvasOpenRef = useRef(false);
   const canvasPanel = useRef<CanvasPanelHandle | null>(null);
   const [liveStatus, setLiveStatus] = useState<LiveStatus>('offline');
+  const [liveActivity, setLiveActivity] = useState<LiveActivity>();
   const [micOn, setMicOn] = useState(false);
   const [visionOn, setVisionOn] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -76,6 +78,7 @@ export function App() {
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
   const [works, setWorks] = useState<WorkItemSnapshot[]>([]);
+  const [mediaJobs, setMediaJobs] = useState<MediaJobSnapshot[]>([]);
   const [workCenterOpen, setWorkCenterOpen] = useState(false);
   const [workEvents, setWorkEvents] = useState<Record<string, ActivityEvent[]>>({});
   const [previewVersion, setPreviewVersion] = useState<string>();
@@ -119,8 +122,11 @@ export function App() {
   const captionFadeTimer = useRef<number | undefined>(undefined);
   const captionClearTimer = useRef<number | undefined>(undefined);
   const uploadSequence = useRef(0);
+  const reportedPublicationFailures = useRef(new Set<string>());
   const taskBusy = !!task && !['completed', 'failed', 'cancelled'].includes(task.status);
   const activeWorks = works.filter((work) => !['completed', 'failed', 'cancelled', 'superseded'].includes(work.status));
+  const mediaProgress = deriveMediaAgentProgress(activeWorks, mediaJobs);
+  const nonMediaWorks = activeWorks.filter((work) => !work.subtasks.some((subtask) => subtask.role === 'media') && !work.attempts.some((attempt) => attempt.role === 'media'));
 
   const reportError = useCallback((message: string) => {
     setError(message); void recordClientError(message, message.toLocaleLowerCase().includes('live') || message.toLocaleLowerCase().includes('gemini') ? 'live' : 'system'); window.setTimeout(() => setError(''), 5500);
@@ -210,8 +216,17 @@ export function App() {
   useEffect(() => { if (catalog.workspaces.length) live.configure(settings, catalog); }, [catalog, live, settings]);
   useEffect(() => {
     const refresh = () => void getActivity().then((page) => setActivityUnresolved(page.unresolved)).catch(() => undefined);
-    refresh(); const stop = watchActivity(refresh); return stop;
-  }, []);
+    refresh();
+    const stop = watchActivity((record) => {
+      refresh();
+      if (record.previewVersion) setPreviewVersion(record.previewVersion);
+      if (record.source === 'workspace' && record.publicationPending === false && record.status === 'failed' && !reportedPublicationFailures.current.has(record.id)) {
+        reportedPublicationFailures.current.add(record.id);
+        reportError(record.message);
+      }
+    });
+    return stop;
+  }, [reportError]);
 
   useEffect(() => {
     getAssistantProfile().then(async (profile) => {
@@ -232,11 +247,12 @@ export function App() {
       setLiveStatus(status);
       if (status === 'error' && detail) reportError(detail);
       if (status === 'ready' && pendingCompletion.current) {
-        live.sendText(`[WORKSPACE EVENT] ${pendingCompletion.current}`); pendingCompletion.current = '';
+        live.sendText(`[WORKSPACE EVENT] ${speechSafeText(pendingCompletion.current)}`); pendingCompletion.current = '';
       }
       if (status === 'ready') void syncWorkspaceFrame();
     };
     live.onAudio = (samples) => avatar.current?.enqueueAudio(samples);
+    live.onActivity = setLiveActivity;
     live.onInterrupted = () => avatar.current?.interrupt();
     live.onCaption = updateCaption;
     live.onUserInput = authorizeUserTurn;
@@ -263,13 +279,14 @@ export function App() {
     const message = 'planId' in result
       ? `Planning agent ${result.status}: ${result.summary}${result.path ? ` Review ${result.path}.` : ''}`
       : `Coding agent ${result.status}: ${result.summary}`;
-    if (!live.ready || live.inputBlocked || !live.sendText(`[WORKSPACE EVENT] ${message}`)) pendingCompletion.current = message;
+    const spoken = speechSafeText(message);
+    if (!live.ready || live.inputBlocked || !live.sendText(`[WORKSPACE EVENT] ${spoken}`)) pendingCompletion.current = spoken;
   }, [live]);
 
   const announceContinuation = useCallback((run: AgentRunSnapshot) => {
     if (run.kind !== 'planning' || run.status !== 'awaiting_continuation' || !run.continuation || announcedContinuations.current.has(`${run.id}:${run.continuation.segment}`)) return;
     announcedContinuations.current.add(`${run.id}:${run.continuation.segment}`);
-    const message = `Planning run ${run.id} paused after ${run.continuation.interactionCount} interactions: ${run.continuation.message} Ask the user whether they want this same planning run to continue.`;
+    const message = speechSafeText(`Planning paused after ${run.continuation.interactionCount} interactions: ${run.continuation.message} Ask the user whether they want this same planning run to continue.`);
     if (!live.ready || live.inputBlocked || !live.sendText(`[WORKSPACE EVENT] ${message}`)) pendingCompletion.current = message;
   }, [live]);
 
@@ -328,7 +345,7 @@ export function App() {
   useEffect(() => {
     if (!workspaceId) return; let active = true; let mediaMarker = '';
     const refresh = () => void listMediaJobs().then((jobs) => {
-      if (!active) return; const nextMarker = jobs.map((job) => `${job.id}:${job.updatedAt}:${job.previewVersion || ''}`).join('|');
+      if (!active) return; setMediaJobs(jobs); const nextMarker = jobs.map((job) => `${job.id}:${job.updatedAt}:${job.previewVersion || ''}`).join('|');
       if (nextMarker !== mediaMarker) {
         mediaMarker = nextMarker;
         void getActiveWorkspace().then((current) => { if (active && current.id === workspaceId) setPreviewVersion(current.version); }).catch(() => undefined);
@@ -336,7 +353,7 @@ export function App() {
       const stored = localStorage.getItem(`cowork.animation-editor.${workspaceId}`); const dismissed = localStorage.getItem(`cowork.animation-editor-dismissed.${workspaceId}`); const candidate = jobs.find((job) => job.id === stored && job.request.kind === 'animation') || jobs.find((job) => job.id !== dismissed && job.request.kind === 'animation' && ['review', 'completed'].includes(job.status));
       if (candidate) { setAnimationEditorJobId(candidate.id); localStorage.setItem(`cowork.animation-editor.${workspaceId}`, candidate.id); }
     }).catch(() => undefined);
-    refresh(); const timer = window.setInterval(refresh, 2500); return () => { active = false; clearInterval(timer); };
+    refresh(); const timer = window.setInterval(refresh, 1000); return () => { active = false; clearInterval(timer); setMediaJobs([]); };
   }, [workspaceId]);
 
   useEffect(() => {
@@ -352,7 +369,7 @@ export function App() {
         const liveVersion = (event.event.data as { previewVersion?: unknown } | undefined)?.previewVersion; if (typeof liveVersion === 'string') setPreviewVersion(liveVersion);
       }
       else if (event.type === 'work_notice') {
-        const message = `${event.message} Task ${event.workId}.`;
+        const message = speechSafeText(event.message);
         if (!live.ready || live.inputBlocked || !live.sendText(`[WORKSPACE EVENT] ${message}`)) pendingCompletion.current = message;
       }
     });
@@ -416,7 +433,7 @@ export function App() {
       width: Number(response.headers.get('x-capture-width')),
       height: Number(response.headers.get('x-capture-height')),
       selectedElement: selection.kind === 'dom'
-        ? { kind: selection.kind, identifier: selection.identifier, selector: selection.selector, text: selection.text, tagName: selection.tagName }
+        ? { kind: selection.kind, identifier: selection.identifier, selector: selection.selector, xpath: selection.xpath, domPath: selection.domPath, locatorStrategy: selection.locatorStrategy, text: selection.text, tagName: selection.tagName, attributes: selection.attributes, outerHTML: selection.outerHTML, parentText: selection.parentText }
         : { kind: selection.kind, identifier: selection.identifier, canvasId: selection.canvasId, layerId: selection.layerId, label: selection.label },
     };
   }, [live, previewVersion, selection, workspaceId]);
@@ -428,28 +445,12 @@ export function App() {
       try { responses = await live.executeToolCalls(calls, async (call) => {
         try {
           let result: unknown;
-          if (call.name === 'submit_work') {
-            const objective = String(call.args?.objective || '');
-            const grant = await referenceGrant.current; result = await submitWork({
-              objective, strategy: call.args?.strategy as any, dedupeMode: call.args?.dedupeMode as any, clientRequestId: call.id,
-              preferredAgentId: call.args?.preferredAgentId ? String(call.args.preferredAgentId) : undefined,
-              successCriteria: Array.isArray(call.args?.successCriteria) ? call.args.successCriteria.map(String) : [], selectedElement: call.args?.useSelectedElement === false ? undefined : selection,
-              selectedFiles, includeCanvasImage: call.args?.includeWorkspacePreview === true, referenceGrantId: grant?.id,
-            });
-          }
-          else if (call.name === 'update_work') result = await updateWork(String(call.args?.taskId || ''), { text: String(call.args?.change || ''), successCriteria: Array.isArray(call.args?.successCriteria) ? call.args.successCriteria.map(String) : [] }, call.args?.mode as any, typeof call.args?.expectedRevision === 'number' ? call.args.expectedRevision : undefined);
-          else if (call.name === 'cancel_work') result = await cancelWork(String(call.args?.taskId || ''));
-          else if (call.name === 'get_work_status') result = call.args?.taskId ? await getWork(String(call.args.taskId)) : await listWork();
-          else if (call.name === 'approve_work_plan') result = await approveWorkPlan(String(call.args?.taskId || ''), String(call.args?.path || ''), call.args?.hash ? String(call.args.hash) : undefined);
-          else if (call.name === 'answer_work_question') {
-            const response = await fetch(`/api/work/${encodeURIComponent(String(call.args?.taskId || ''))}/questions/${encodeURIComponent(String(call.args?.questionId || ''))}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer: String(call.args?.answer || '') }) });
-            if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not answer the task question.'); result = await response.json();
-          }
-          else if (call.name === 'delegate_coding_task') result = await delegate(call);
-          else if (call.name === 'create_implementation_plan') result = await delegatePlan(call);
-          else if (call.name === 'execute_implementation_plan') result = await beginPlanExecution(String(call.args?.path || ''));
-          else if (call.name === 'respond_to_planning_continuation') result = await continuePlan(String(call.args?.runId || ''), call.args?.continue !== false);
-          else if (call.name === 'open_ui_component') {
+          if (call.name === 'delegate_to_assistant') {
+            const turn = live.currentUserTurn(); if (!turn?.text) throw new Error('The current user turn is unavailable for delegation.');
+            const grant = await referenceGrant.current;
+            const delegated = await delegateToAssistant({ turnId: turn.id, userText: turn.text, liveNote: call.args?.note ? String(call.args.note) : undefined, selectedElement: selection, selectedFiles, referenceGrantId: grant?.id, workspaceVersion: previewVersion });
+            result = { message: speechSafeText(delegated.message) };
+          } else if (call.name === 'open_ui_component') {
             const component = String(call.args?.component || ''); const params = call.args?.params && typeof call.args.params === 'object' ? call.args.params as Record<string, unknown> : {};
             if (component === 'file_manager') {
               if (params.addPaths !== undefined || params.tool !== undefined) throw new Error('Image Editor parameters cannot be used with the file manager.');
@@ -464,8 +465,6 @@ export function App() {
               if (tool) panel.setTool(tool); const layerIds = addPaths.length ? await panel.addWorkspaceImages(addPaths) : [];
               result = { component, open: true, addedPaths: addPaths, layerIds, tool: tool || panel.getContext().tool };
             } else throw new Error('Unknown UI component. Use file_manager or image_editor.');
-          } else if (call.name === 'get_coding_task_status' || call.name === 'get_agent_run_status') {
-            const active = await getActiveRun(); result = { active: !!active, run: active };
           } else if (call.name === 'get_selected_element_context') {
             result = { selected: !!selection, workspaceVersion: previewVersion, element: selection || null };
           } else if (call.name === 'capture_selected_element_image') {
@@ -480,36 +479,29 @@ export function App() {
             result = await searchFiles(String(call.args?.query || ''), String(call.args?.path || '.'));
           } else if (call.name === 'read_workspace_file') {
             result = await readFile(String(call.args?.path || ''));
-          } else if (['list_reference_workspace_files', 'search_reference_workspace_files', 'read_reference_workspace_file', 'copy_reference_workspace_file'].includes(call.name)) {
+          } else if (['list_reference_workspace_files', 'search_reference_workspace_files', 'read_reference_workspace_file'].includes(call.name)) {
             const grant = await referenceGrant.current;
             if (!grant?.workspaceIds.length) throw new Error('Name the source workspace explicitly in this request before accessing it.');
             const common = { grantId: grant.id, workspace: String(call.args?.workspace || '') };
             if (call.name === 'list_reference_workspace_files') result = await referenceOperation('list', { ...common, path: String(call.args?.path || '.') });
             if (call.name === 'search_reference_workspace_files') result = await referenceOperation('search', { ...common, query: String(call.args?.query || ''), path: String(call.args?.path || '.') });
             if (call.name === 'read_reference_workspace_file') result = await referenceOperation('read', { ...common, path: String(call.args?.path || '') });
-            if (call.name === 'copy_reference_workspace_file') {
-              result = await referenceOperation<any>('copy', { ...common, sourcePath: String(call.args?.sourcePath || ''), destinationPath: String(call.args?.destinationPath || '') });
-              if ((result as any)?.version) { setPreviewVersion((result as any).version); setFileRefreshKey((value) => value + 1); }
-            }
-          } else if (call.name === 'edit_workspace_files') {
-            if (!settings.liveAgent.directFileEdits) throw new Error('Direct Live-agent file edits are disabled in Workspace Settings.');
-            result = await editFiles(Array.isArray(call.args?.edits) ? call.args!.edits as any[] : [], call.id); if ((result as any).version) { setPreviewVersion((result as any).version); setFileRefreshKey((value) => value + 1); }
           } else result = avatar.current?.runTool(call.name, call.args || {}) || { ok: false, error: 'avatar unavailable' };
           return { id: call.id, name: call.name, response: { result } };
         } catch (reason) {
           const message = (reason as Error).message; reportError(message);
-          return { id: call.id, name: call.name, response: { error: message } };
+          return { id: call.id, name: call.name, response: { error: speechSafeText(message) } };
         }
       }); } catch (reason) {
-        const message = (reason as Error).message; reportError(message); responses = calls.map((call) => ({ id: call.id, name: call.name, response: { error: message } }));
+        const message = (reason as Error).message; reportError(message); responses = calls.map((call) => ({ id: call.id, name: call.name, response: { error: speechSafeText(message) } }));
       }
       live.inputBlocked = false;
       if (!live.sendToolResponse(responses)) {
-        pendingCompletion.current = `An agent tool finished while the Live connection was unavailable: ${JSON.stringify(responses.map((item) => item.response))}`;
+        pendingCompletion.current = speechSafeText(`An agent tool finished while the Live connection was unavailable: ${JSON.stringify(responses.map((item) => item.response))}`);
         live.connect();
       }
     };
-  }, [beginPlanExecution, captureSelectedElement, delegate, delegatePlan, focusFile, live, openCanvasPanel, previewVersion, reportError, selectedFiles, selection, settings]);
+  }, [captureSelectedElement, focusFile, live, openCanvasPanel, previewVersion, reportError, selectedFiles, selection, settings]);
 
   const toggleMic = async () => {
     avatar.current?.ensureAudio();
@@ -585,10 +577,11 @@ export function App() {
 
   const sendText = (text: string) => {
     avatar.current?.ensureAudio();
+    live.beginUserTurn(text);
     authorizeUserTurn(text);
     updateCaption(text, true);
     const elementContext = selection ? selection.kind === 'dom'
-      ? `\n\n[CURRENT USER-SELECTION CONTEXT]\nKind: DOM\nIdentifier: ${selection.identifier}\nSelector: ${selection.selector}\nElement: ${selection.tagName}\nVisible text: ${JSON.stringify(selection.text)}\nAttributes: ${JSON.stringify(selection.attributes)}`
+      ? `\n\n[CURRENT USER-SELECTION CONTEXT]\nKind: DOM\nIdentifier: ${selection.identifier}\nLocator strategy: ${selection.locatorStrategy || 'css'}\nSelector: ${selection.selector}\nXPath: ${selection.xpath || 'unavailable'}\nIndexed DOM path: ${JSON.stringify(selection.domPath || [])}\nElement: ${selection.tagName}\nVisible text: ${JSON.stringify(selection.text)}\nAttributes: ${JSON.stringify(selection.attributes)}\nNearby HTML: ${selection.outerHTML}`
       : `\n\n[CURRENT USER-SELECTION CONTEXT]\nKind: canvas layer\nIdentifier: ${selection.identifier}\nCanvas: ${selection.canvasId}\nLayer: ${selection.layerId}\nLabel: ${selection.label}\nType: ${selection.layerType}\nProperties: ${JSON.stringify(selection.properties)}` : '';
     const fileContext = selectedFiles.length ? `\n\n[SELECTED WORKSPACE FILES]\n${selectedFiles.map((path) => `- ${path}`).join('\n')}` : '';
     const outgoing = `${text}${elementContext}${fileContext}`;
@@ -637,12 +630,17 @@ export function App() {
       <div className="status-pill"><span className={`status-led ${liveStatus}`} />{`live · ${liveStatus}`}</div>
       {selection && <div className="selection-pill"><span>Selected</span><strong>{selection.kind === 'dom' ? selection.text || selection.selector : selection.label}</strong><button onClick={clearSelection} aria-label="Clear selected element">×</button></div>}
       {!!selectedFiles.length && <div className={`selection-pill file-selection-pill ${selection ? 'with-element' : ''}`}><span>Files</span><strong>{selectedFiles.join(', ')}</strong><button onClick={() => setSelectedFiles([])} aria-label="Clear selected files">×</button></div>}
-      <AvatarPanel caption={subtitlesOn ? caption : ''} captionFading={captionFading} canvasControls={avatarCanvasControls} toolbar={toolbar} headerActions={avatarHeaderActions} onReady={avatarReady} onError={reportError} />
+      <AvatarPanel caption={subtitlesOn ? caption : ''} captionFading={captionFading} activity={liveActivity} canvasControls={avatarCanvasControls} toolbar={toolbar} headerActions={avatarHeaderActions} onReady={avatarReady} onError={reportError} />
       <ChatTray open={chatOpen} caption={caption} disabled={false} onClose={() => setChatOpen(false)} onSend={sendText} />
-      {taskBusy && <button className={`task-beacon ${task?.kind || ''}`} onClick={() => setTerminalOpen(true)}>{task?.status === 'awaiting_continuation' ? <span className="continuation-mark">?</span> : <span className="spinner" />} {runLabel} · {todoProgress || task?.status}</button>}
-      {!!activeWorks.length && <button className="work-beacon" onClick={() => setWorkCenterOpen(true)}><span className="spinner" /> {activeWorks.filter((work) => ['running', 'planning', 'integrating', 'validating', 'publishing'].includes(work.status)).length} active · {activeWorks.filter((work) => work.status === 'queued').length} queued{activeWorks.some((work) => ['needs_input', 'awaiting_approval'].includes(work.status)) ? ' · action needed' : ''}</button>}
+      {(taskBusy || mediaProgress || nonMediaWorks.length > 0) && <div className="agent-beacon-stack">
+        {taskBusy && <button className={`task-beacon ${task?.kind || ''}`} onClick={() => setTerminalOpen(true)}>{task?.status === 'awaiting_continuation' ? <span className="continuation-mark">?</span> : <span className="spinner" />} {runLabel} · {todoProgress || task?.status}</button>}
+        {mediaProgress && <button className="media-agent-beacon" aria-label={`Open Media Agent progress: ${mediaProgress.detail}, ${mediaProgress.stage}, ${mediaProgress.progress}%`} onClick={() => mediaProgress.workId ? setWorkCenterOpen(true) : setTerminalOpen(true)}>
+          <span className="spinner media-spinner" /><span><strong>Media Agent</strong><small>{mediaProgress.detail} · {mediaProgress.stage}</small></span><b>{mediaProgress.progress}%</b>
+        </button>}
+        {!!nonMediaWorks.length && <button className="work-beacon" onClick={() => setWorkCenterOpen(true)}><span className="spinner" /> {nonMediaWorks.filter((work) => ['running', 'planning', 'integrating', 'validating', 'publishing'].includes(work.status)).length} active · {nonMediaWorks.filter((work) => work.status === 'queued').length} queued{nonMediaWorks.some((work) => ['needs_input', 'awaiting_approval'].includes(work.status)) ? ' · action needed' : ''}</button>}
+      </div>}
       <AgentTerminal open={terminalOpen} task={task} events={events} onClose={() => setTerminalOpen(false)} onContinue={() => { if (task?.kind === 'planning') void continuePlan(task.id, true).catch((reason) => reportError((reason as Error).message)); }} onCancel={() => task && void (task.kind === 'planning' ? cancelPlan(task.id) : cancelTask(task.id))} onOpenMedia={(id) => { setAnimationEditorJobId(id); localStorage.removeItem(`cowork.animation-editor-dismissed.${workspaceId}`); localStorage.setItem(`cowork.animation-editor.${workspaceId}`, id); }} />
-      <WorkCenter open={workCenterOpen} works={works} events={workEvents} onClose={() => setWorkCenterOpen(false)} onCancel={(id) => void cancelWork(id).catch((reason) => reportError((reason as Error).message))} onApprove={(work) => { if (work.plan) void approveWorkPlan(work.id, work.plan.path, work.plan.hash).catch((reason) => reportError((reason as Error).message)); }} />
+      <WorkCenter open={workCenterOpen} works={works} events={workEvents} onClose={() => setWorkCenterOpen(false)} onCancel={(id) => void cancelWork(id).catch((reason) => reportError((reason as Error).message))} onApprove={(work) => { if (work.plan) void approveWorkPlan(work.id, work.plan.path, work.plan.hash).catch((reason) => reportError((reason as Error).message)); }} onAnswer={(workId, questionId, answer) => void answerWorkQuestion(workId, questionId, answer).catch((reason) => reportError((reason as Error).message))} />
       <ActivityPanel open={activityOpen} onClose={() => setActivityOpen(false)} onError={reportError} onVersion={setPreviewVersion} onReconnectLive={() => live.restartForConfiguration()} onOpenRun={() => activeWorks.length ? setWorkCenterOpen(true) : setTerminalOpen(true)} onOpenFile={(path) => { setFocusFile(path); setFileRefreshKey((value) => value + 1); setFileManagerOpen(true); }} onAskLive={sendText} />
       {fileManagerOpen && <Suspense fallback={<div className="toast">Opening workspace files…</div>}><FileManager focusPath={focusFile} refreshKey={fileRefreshKey} selectedPaths={selectedFiles} onSelectedPaths={setSelectedFiles} onUpload={(files, destination) => performUpload(files, destination)} onExecutePlan={beginPlanExecution} onClose={() => setFileManagerOpen(false)} onVersion={setPreviewVersion} onError={reportError} /></Suspense>}
       {canvasLoaded && <Suspense fallback={<div className="toast">Opening Image Editor…</div>}><CanvasPanel ref={canvasPanel} open={canvasOpen} workspaceId={workspaceId} busyMessage={canvasBusy} visionActive={canvasOpen && liveStatus === 'ready'} onCompositeChange={connectCanvasSurface} onClose={() => { setCanvasOpen(false); void canvasPanel.current?.flush(); }} onError={reportError} onSaved={(path, version) => { setPreviewVersion(version); setFileRefreshKey((value) => value + 1); if (path) setFocusFile(path); }} /></Suspense>}

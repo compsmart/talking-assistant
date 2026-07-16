@@ -74,7 +74,7 @@ The schema represents tool bindings, credential slots, and grants, but the curre
 
 ### Focused edit
 
-With direct edits enabled, the Live agent reads the target and applies one atomic edit for a small, localized change. The workspace change service publishes and records it without creating durable worker work.
+Live has no workspace-mutation or task-lifecycle tools. It forwards the authoritative user turn through one idempotent Assistant handoff. When Assistant fast edits are enabled, the Assistant may send one clear, localized existing-file change to a restricted read/search/edit worker. The workspace change service rolls back unsafe or multi-file attempts, publishes successful edits, and records them in Activity Center without creating durable worker work.
 
 ### Durable coding
 
@@ -92,8 +92,10 @@ Media jobs are durable, cancellable, and revisioned. Standalone media generation
 
 - Workspace coding concurrency defaults to `3` and is configurable from `1` to `8`; this is the worker-pool capacity used by orchestration.
 - Profile-level concurrency further limits a selected profile. `MAX_PARALLEL_AGENTS` is parsed and clamped in server configuration, but the current worker pool does not use it to override the workspace setting.
+- A temporary profile concurrency shortage leaves work queued and retries automatically; it does not create a `needs_input` question.
 - Coding worktrees run concurrently, but integration is serialized per workspace.
 - Exact or normalized semantic duplicates can return the existing active work item unless the caller explicitly forces a duplicate.
+- Assistant handoffs are idempotent per workspace and user-turn ID. The Assistant sees active work before it may create, reuse, update, cancel, answer, or approve a task.
 - Interrupted active work is placed back in the queue on server restart; its interrupted attempt is recorded as failed.
 - Coding model loops are bounded to 60 interactions per attempt.
 - Planning segments are bounded to 80 interactions and can continue with their saved interaction chain after a step limit or timeout.

@@ -14,7 +14,7 @@ import { PlanningAgent } from './agent/PlanningAgent.js';
 import { PlanManager } from './agent/PlanManager.js';
 import { PlanStore } from './agent/PlanStore.js';
 import { LiveProxy } from './live/LiveProxy.js';
-import type { AgentStage, RoutingSimulation, TaskRequest, WorkRequest, WorkUpdateMode, WorkspaceMode } from '../shared/protocol.js';
+import type { AgentStage, AssistantIntakeRequest, RoutingSimulation, TaskRequest, WorkRequest, WorkUpdateMode, WorkspaceMode } from '../shared/protocol.js';
 import { AssetService } from './workspace/AssetService.js';
 import { WorkspaceFiles } from './workspace/WorkspaceFiles.js';
 import { WorkspaceGit } from './workspace/WorkspaceGit.js';
@@ -38,6 +38,8 @@ import { AgentConfigService } from './agents/AgentConfigService.js';
 import { SecretVault } from './agents/SecretVault.js';
 import { ToolCatalog } from './agents/ToolCatalog.js';
 import { AgentRouter, type RoutableAgentProfile } from './orchestration/AgentRouter.js';
+import { AssistantDirectExecutor } from './orchestration/AssistantDirectExecutor.js';
+import { AssistantIntakeService } from './orchestration/AssistantIntakeService.js';
 
 const activity = new ActivityHub();
 const registry = new WorkspaceRegistry();
@@ -71,6 +73,8 @@ const gitWorktrees = new GitWorktreeService(registry, workspace, lock);
 const concurrentRunner = new ConcurrentCodingRunner(gitWorktrees, tools, workspace, settings, activity);
 const assistantCoordinator = new AssistantCoordinator(agentConfig);
 const orchestrator = new WorkOrchestrator(workStore, tasks, plans, planStore, activity, grants, registry, settings, concurrentRunner, assistantCoordinator);
+const assistantDirect = new AssistantDirectExecutor(tools, changes, settings, activity);
+const assistantIntake = new AssistantIntakeService(workStore, orchestrator, assistantCoordinator, assistantDirect, registry, settings);
 const live = new LiveProxy();
 const serverStartedAt = new Date().toISOString();
 
@@ -225,6 +229,7 @@ app.post('/api/workspace/selection-snapshot', async (request, response) => {
 app.get('/api/tasks/active', (_request, response) => response.json(tasks.getActive() || null));
 app.get('/api/agent-runs/active', (_request, response) => response.json(plans.getActive() || tasks.getActive() || null));
 app.get('/api/work', (request, response) => route(response, async () => orchestrator.list(stringQuery(request.query.workspaceId))));
+app.post('/api/assistant/requests', (request, response) => route(response, () => assistantIntake.handle(request.body as AssistantIntakeRequest)));
 app.get('/api/work/:id', (request, response) => { const work = orchestrator.get(request.params.id); response.status(work ? 200 : 404).json(work || { error: 'Work item not found.' }); });
 app.post('/api/work', (request, response) => {
   try { response.status(202).json(orchestrator.submit(request.body as WorkRequest)); }
@@ -247,7 +252,7 @@ app.get('/api/activity', (request, response) => response.json(activity.list({
   workspaceId: registry.active().id, all: request.query.scope === 'all', severity: stringQuery(request.query.severity), source: stringQuery(request.query.source),
   query: stringQuery(request.query.q), cursor: stringQuery(request.query.cursor), limit: Number(request.query.limit) || undefined,
 })));
-app.delete('/api/activity', (_request, response) => route(response, () => activity.clearWorkspace(registry.active().id)));
+app.delete('/api/activity', (request, response) => route(response, () => request.query.scope === 'all' ? activity.clearAll() : activity.clearWorkspace(registry.active().id)));
 app.get('/api/activity/:id/events', (request, response) => route(response, () => activity.events(request.params.id)));
 app.get('/api/activity/:id/export', async (request, response) => {
   try { const events = await activity.events(request.params.id); response.setHeader('content-disposition', `attachment; filename="${request.params.id}.jsonl"`); response.type('application/x-ndjson').send(events.map((event) => JSON.stringify(event)).join('\n') + (events.length ? '\n' : '')); }

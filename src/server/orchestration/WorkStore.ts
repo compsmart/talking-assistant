@@ -45,6 +45,14 @@ export class WorkStore {
         result_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS assistant_requests (
+        workspace_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (workspace_id, turn_id)
+      );
     `);
   }
 
@@ -67,7 +75,7 @@ export class WorkStore {
     }
     const at = now(); const work: WorkItemSnapshot = {
       kind: 'work', id: randomUUID(), workspaceId, strategy, status: 'queued', specRevision: 1, request, fingerprint,
-      createdAt: at, updatedAt: at, subtasks: [], attempts: [], questions: [],
+      createdAt: at, updatedAt: at, subtasks: [], attempts: [], questions: [], dispatch: input.dispatch,
     };
     this.db.prepare('INSERT INTO work_items (id, workspace_id, client_request_id, fingerprint, status, snapshot_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
       .run(work.id, workspaceId, input.clientRequestId || null, fingerprint, work.status, JSON.stringify(work), at, at);
@@ -104,6 +112,21 @@ export class WorkStore {
     const existing = this.db.prepare('SELECT signature, result_json FROM work_operations WHERE operation_id = ?').get(operationId) as { signature: string; result_json: string } | undefined;
     if (existing) { if (existing.signature !== signature) throw statusError('Operation ID was replayed with different arguments.', 409); return JSON.parse(existing.result_json) as T; }
     const result = action(); this.db.prepare('INSERT INTO work_operations (operation_id, signature, result_json, created_at) VALUES (?, ?, ?, ?)').run(operationId, signature, JSON.stringify(result), now()); return result;
+  }
+
+  assistantResult<T>(workspaceId: string, turnId: string, signatureValue: unknown): T | undefined {
+    const row = this.db.prepare('SELECT signature, result_json FROM assistant_requests WHERE workspace_id = ? AND turn_id = ?').get(workspaceId, turnId) as { signature: string; result_json: string } | undefined;
+    if (!row) return undefined;
+    const signature = digest(JSON.stringify(signatureValue));
+    if (row.signature !== signature) throw statusError('Assistant turn ID was replayed with different user input.', 409);
+    return JSON.parse(row.result_json) as T;
+  }
+
+  saveAssistantResult<T>(workspaceId: string, turnId: string, signatureValue: unknown, result: T): T {
+    const signature = digest(JSON.stringify(signatureValue));
+    this.db.prepare('INSERT OR IGNORE INTO assistant_requests (workspace_id, turn_id, signature, result_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(workspaceId, turnId, signature, JSON.stringify(result), now());
+    return this.assistantResult<T>(workspaceId, turnId, signatureValue)!;
   }
 
   private write(work: WorkItemSnapshot) {

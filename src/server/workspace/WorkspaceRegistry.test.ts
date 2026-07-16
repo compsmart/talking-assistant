@@ -46,7 +46,9 @@ describe('generated workspace server', () => {
       expect(registry.records()).toHaveLength(1);
       expect(active.name).toBe('Workspace 1');
       expect(await readFile(join(active.draftDir, 'index.html'), 'utf8')).toContain('<h1>New Mixed Workspace</h1>');
-      expect(await readFile(join(active.draftDir, 'package.json'), 'utf8')).toContain('cowork-workspace');
+      const packageJson = JSON.parse(await readFile(join(active.draftDir, 'package.json'), 'utf8'));
+      expect(packageJson.name).toBe('cowork-workspace');
+      expect(packageJson.dependencies).toMatchObject({ sharp: '^0.35.3' });
       expect((await stat(active.stateDir)).isDirectory()).toBe(true);
 
       const dom = await registry.create('DOM workspace', 'dom');

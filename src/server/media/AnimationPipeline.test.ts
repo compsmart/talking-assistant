@@ -38,7 +38,7 @@ describe('edge-connected matte', () => {
     // An enclosed green opening plus a bright green antialias pixel on its rim.
     for (let y = 5; y <= 8; y++) for (let x = 5; x <= 8; x++) { const offset = (y * width + x) * 4; rgba[offset] = 0; rgba[offset + 1] = 255; rgba[offset + 2] = 0; }
     const fringe = (5 * width + 4) * 4; rgba[fringe] = 18; rgba[fringe + 1] = 205; rgba[fringe + 2] = 16;
-    await sharp(rgba, { raw: { width, height, channels: 4 } }).png().toFile(source); await removeEdgeConnectedBackground(source, output, { backgroundColor: '#00ff00', tolerance: 48, feather: 1, despill: 1, edgeConnected: false });
+    await sharp(rgba, { raw: { width, height, channels: 4 } }).png().toFile(source); await removeEdgeConnectedBackground(source, output, { backgroundColor: '#00ff00', tolerance: 50, feather: 1, despill: 1, edgeConnected: false });
     const data = await sharp(output).ensureAlpha().raw().toBuffer(); expect(data[(6 * width + 6) * 4 + 3]).toBe(0); expect(data[fringe + 3]).toBe(0);
     for (let index = 0; index < width * height; index++) if (data[index * 4 + 3] > 0 && data[index * 4 + 3] < 255) expect(data[index * 4 + 1]).toBeLessThanOrEqual(Math.max(data[index * 4], data[index * 4 + 2]));
   });

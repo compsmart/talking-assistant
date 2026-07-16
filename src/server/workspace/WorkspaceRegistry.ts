@@ -132,7 +132,7 @@ function boundaryAt(value: string, index: number) { return index < 0 || index >=
 function statusError(message: string, status: number) { const error = new Error(message) as Error & { status?: number }; error.status = status; return error; }
 
 async function writeScaffold(root: string, mode: WorkspaceMode) {
-  const packageJson = { name: 'cowork-workspace', version: '0.0.1', private: true, type: 'module', scripts: { start: 'node server.mjs', build: 'node scripts/build.mjs', test: 'node --test' } };
+  const packageJson = { name: 'cowork-workspace', version: '0.0.1', private: true, type: 'module', scripts: { start: 'node server.mjs', build: 'node scripts/build.mjs', test: 'node --test' }, dependencies: { sharp: '^0.35.3' } };
   const scaffold = scaffoldFor(mode);
   const files: Record<string, string> = {
     'package.json': JSON.stringify(packageJson, null, 2) + '\n',

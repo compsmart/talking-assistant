@@ -47,7 +47,7 @@ const BUILTIN_TOOLS: AgentToolDescriptor[] = [
   ...simpleTools('data-documents', [['data.inspect', 'Inspect data', 'Inspect JSON, JSONL, CSV, TSV, or YAML structure.'], ['data.query', 'Query data', 'Filter and project bounded structured-data rows.'], ['sqlite.query', 'Query SQLite', 'Run a bounded read statement against an immutable workspace database.'], ['document.extract_text', 'Extract document text', 'Extract bounded text from PDF, DOCX, HTML, Markdown, or text.'], ['archive.inspect', 'Inspect archive', 'List ZIP members and read bounded text members without extraction.']], ['read'], READ_STAGES),
   ...simpleTools('media', [['image.inspect', 'Inspect image', 'Read image dimensions, format, channels, and metadata.'], ['image.compare', 'Compare images', 'Create a bounded visual comparison artifact.'], ['media.probe', 'Probe media', 'Inspect audio or video streams with FFprobe.'], ['media.extract_frame', 'Extract media frame', 'Create a task artifact from one video frame.']], ['read', 'execute'], ['researcher', 'coder', 'reviewer', 'resolver', 'media']),
   ...simpleTools('utilities', [['calculate', 'Calculate', 'Evaluate an allowlisted arithmetic expression without eval.'], ['datetime', 'Date and time', 'Parse, format, and calculate dates and times.'], ['regex.test', 'Test regular expression', 'Test a bounded regular expression in a disposable worker with a timeout.'], ['content.hash', 'Hash content', 'Compute a content digest with an allowlisted algorithm.']], ['read'], ALL_STAGES),
-  mediaDescriptor('media.generate_image', 'Generate image', 'Generate an explicitly requested raster image asset through a persistent Media Agent job; never use this for a workspace HTML5 canvas change.', 'image', {
+  mediaDescriptor('media.generate_image', 'Generate image', 'Generate an explicitly requested raster image asset through a persistent Media Agent job. Set transparent=true to generate on a green stage and remove it in the same job while preserving white subject details; never use this for a workspace HTML5 canvas change.', 'image', {
     prompt: textInput('Detailed creative brief'), name: textInput('Stable output filename stem'), transparent: { type: 'boolean' }, referenceImages: stringListInput('Workspace-relative reference images'), aspectRatio: aspectRatioInput(),
   }),
   mediaDescriptor('media.generate_video', 'Generate video', 'Generate a video through a persistent Media Agent job.', 'video', {
@@ -63,7 +63,7 @@ const BUILTIN_TOOLS: AgentToolDescriptor[] = [
     prompt: textInput('Detailed sound-effect brief'), name: textInput('Stable output filename stem'), durationSeconds: numberInput('Requested duration'),
   }),
   descriptor('remove_image_background', 'Remove image background', 'Process a workspace image.', 'media', ['write', 'execute'], ['media']),
-  descriptor('extract_image_regions', 'Extract image regions', 'Split foreground regions into assets.', 'media', ['write', 'execute'], ['media']),
+  descriptor('extract_image_regions', 'Extract image regions', 'Split visual foreground regions into assets, grouping nearby detached details.', 'media', ['write', 'execute'], ['media']),
   {
     ...descriptor('run_node_script', 'Run Node script', 'Run a checked-in Node.js utility beneath scripts/ in the isolated workspace sandbox.', 'execution-quality', ['execute'], ALL_STAGES),
     locked: true,

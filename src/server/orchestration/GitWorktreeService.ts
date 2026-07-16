@@ -19,7 +19,7 @@ export class GitWorktreeService {
       await this.checkpoint(workspaceId, `cowork: checkpoint workspace changes before ${attemptId.slice(0, 8)}`);
       const baseCommit = await this.output(context.gitDir, ['rev-parse', 'refs/heads/main']);
       const branch = `cowork/task/${safe(attemptId)}`; const root = join(context.stateDir, 'agent-worktrees', safe(attemptId));
-      await rm(root, { recursive: true, force: true }); await mkdir(join(context.stateDir, 'agent-worktrees'), { recursive: true });
+      await removeTreeWithRetries(root); await mkdir(join(context.stateDir, 'agent-worktrees'), { recursive: true });
       await this.command(context.gitDir, ['branch', '-D', branch], true);
       await this.command(context.gitDir, ['worktree', 'add', '-b', branch, root, baseCommit]);
       return { workspaceId, attemptId, root, branch, baseCommit };
@@ -39,7 +39,7 @@ export class GitWorktreeService {
       const context = this.registry.get(work.workspaceId); await this.checkpoint(work.workspaceId, `cowork: checkpoint workspace changes before integrating ${work.id.slice(0, 8)}`);
       const main = await this.output(context.gitDir, ['rev-parse', 'refs/heads/main']);
       const integrationBranch = `cowork/integration/${safe(work.id)}-${work.specRevision}`; const root = join(context.stateDir, 'agent-worktrees', `integration-${safe(work.id)}`);
-      await rm(root, { recursive: true, force: true }); await this.command(context.gitDir, ['branch', '-D', integrationBranch], true);
+      await removeTreeWithRetries(root); await this.command(context.gitDir, ['branch', '-D', integrationBranch], true);
       await this.command(context.gitDir, ['worktree', 'add', '-b', integrationBranch, root, main]);
       try {
         const merge = await run('git', ['merge', '--no-ff', '--no-commit', headCommit], { cwd: root, timeout: 120_000 });
@@ -66,7 +66,7 @@ export class GitWorktreeService {
           throw error;
         }
       } finally {
-        await this.command(context.gitDir, ['worktree', 'remove', '--force', root], true); await rm(root, { recursive: true, force: true });
+        await this.command(context.gitDir, ['worktree', 'remove', '--force', root], true); await removeTreeWithRetries(root); await this.command(context.gitDir, ['worktree', 'prune'], true);
         await this.command(context.gitDir, ['branch', '-D', integrationBranch], true);
       }
     }));
@@ -74,7 +74,7 @@ export class GitWorktreeService {
 
   cleanup(task: TaskWorktree, removeBranch = true) {
     return this.serial(task.workspaceId, async () => {
-      const context = this.registry.get(task.workspaceId); await this.command(context.gitDir, ['worktree', 'remove', '--force', task.root], true); await rm(task.root, { recursive: true, force: true });
+      const context = this.registry.get(task.workspaceId); await this.command(context.gitDir, ['worktree', 'remove', '--force', task.root], true); await removeTreeWithRetries(task.root); await this.command(context.gitDir, ['worktree', 'prune'], true);
       if (removeBranch) await this.command(context.gitDir, ['branch', '-D', task.branch], true);
     });
   }
@@ -106,3 +106,19 @@ async function diffFilesAt(root: string, range: string): Promise<FileReference[]
 }
 function safe(value: string) { return value.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 80); }
 function statusError(message: string, status: number) { const error = new Error(message) as Error & { status?: number }; error.status = status; return error; }
+
+const RETRYABLE_REMOVE_ERRORS = new Set(['EBUSY', 'EPERM', 'ENOTEMPTY', 'EMFILE', 'ENFILE']);
+const REMOVE_RETRY_DELAYS_MS = [100, 200, 400, 800, 1_200, 1_600, 2_000, 2_500];
+
+export async function removeTreeWithRetries(path: string, remove: typeof rm = rm, wait: (milliseconds: number) => Promise<unknown> = delay) {
+  for (let attempt = 0; ; attempt++) {
+    try { await remove(path, { recursive: true, force: true }); return; }
+    catch (error: any) {
+      const retryDelay = REMOVE_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined || !RETRYABLE_REMOVE_ERRORS.has(error?.code)) throw error;
+      await wait(retryDelay);
+    }
+  }
+}
+
+function delay(milliseconds: number) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }

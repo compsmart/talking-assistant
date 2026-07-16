@@ -146,7 +146,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
     try {
       const result = await deleteFiles(paths); const removed = new Set(result.value);
       void logAndCommit(result.value.map((path) => `user deleted file ${path}`));
-      onVersion(result.version); onSelectedPaths(selectedPaths.filter((path) => !removed.has(path)));
+      onSelectedPaths(selectedPaths.filter((path) => !removed.has(path)));
       setResults((items) => items.filter((item) => !removed.has(item.path)));
       setClipboard((value) => value && removed.has(value.path) ? undefined : value);
       if (active && removed.has(active.path)) { setActive(undefined); setDocument(undefined); setContent(''); }
@@ -215,6 +215,12 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
   const requestClose = async () => { if (dirty) { setDialog('unsaved'); return; } await finishClose(); };
   const saveAndClose = async () => { if (!await save()) return; await finishClose(); };
   const toggleSelected = (path: string) => onSelectedPaths(selectedPaths.includes(path) ? selectedPaths.filter((item) => item !== path) : [...selectedPaths, path]);
+  const selectAllInCurrentFolder = async () => {
+    try {
+      const files = (await listFiles(currentDirectory)).filter((item) => item.kind === 'file').map((item) => item.path);
+      onSelectedPaths(files);
+    } catch (error) { onError((error as Error).message); }
+  };
   const uploadInto = useCallback(async (files: File[], destination: string) => {
     if (isPlansDirectory(destination)) { onError('The plans directory is managed automatically. Choose another folder.'); return; }
     try {
@@ -258,7 +264,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
             : <div className="file-tree"><TreeDirectory treeRoot="project" activeTreeRoot={currentTreeRoot} path="." label="Project" selected={selectedPaths} active={active?.path} currentDirectory={currentDirectory} view={view} inlineEdit={inlineEdit} inlineName={inlineName} inlineError={inlineError} inlineBusy={!!mutating} recentPath={recentPath} refreshKey={treeRefreshKey} onOpen={openPath} onToggle={toggleSelected} onSelectDirectory={selectDirectory} onInlineName={setInlineName} onSubmitInline={() => void submitInlineEdit()} onCancelInline={cancelInlineEdit} onMenu={openFileMenu} onDropFiles={uploadInto} defaultOpen /></div>}
         </aside>
         <section className="file-viewer">
-          <header className="file-viewer-header"><span>{active?.path || 'Select a file'}</span>{active && <label><input type="checkbox" checked={selectedPaths.includes(active.path)} onChange={() => toggleSelected(active.path)} /> Agent context</label>}{!!selectedPaths.length && <button className="danger" disabled={operationBusy} onClick={() => void removeSelected()}>{deleting ? 'Deleting…' : `Delete selected (${selectedPaths.length})`}</button>}{document && <button disabled={!dirty || operationBusy} onClick={() => void save()}>{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button>}{isPlan && <button className="proceed" disabled={operationBusy} onClick={() => void proceed()}>Proceed</button>}</header>
+          <header className="file-viewer-header"><span>{active?.path || 'Select a file'}</span>{active && <label><input type="checkbox" checked={selectedPaths.includes(active.path)} onChange={() => toggleSelected(active.path)} /> Agent context</label>}<button className="secondary" disabled={operationBusy} onClick={() => void selectAllInCurrentFolder()}>Select all</button>{!!selectedPaths.length && <button className="danger" disabled={operationBusy} onClick={() => void removeSelected()}>{deleting ? 'Deleting…' : `Delete selected (${selectedPaths.length})`}</button>}{document && <button disabled={!dirty || operationBusy} onClick={() => void save()}>{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button>}{isPlan && <button className="proceed" disabled={operationBusy} onClick={() => void proceed()}>Proceed</button>}</header>
           <div className="file-viewer-body">{loading ? <div className="file-empty">Loading…</div> : !active ? <div className="file-empty">Select a project file or drop media onto the workspace.</div> : document ? <CodeMirror value={content} height="100%" theme="dark" extensions={extensions} onChange={setContent} basicSetup={{ foldGutter: true, lineNumbers: true, highlightActiveLine: true }} /> : <MediaPreview file={active} />}</div>
         </section>
       </div>

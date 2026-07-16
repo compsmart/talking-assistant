@@ -56,7 +56,7 @@ export class ActivityHub {
     return record;
   }
 
-  finish(id: string, status: ActivityStatus, message: string, details: Partial<Pick<ActivityRecord, 'severity' | 'httpStatus' | 'paths' | 'requestId'>> = {}) {
+  finish(id: string, status: ActivityStatus, message: string, details: Partial<Pick<ActivityRecord, 'severity' | 'httpStatus' | 'paths' | 'requestId' | 'previewVersion' | 'publicationPending'>> = {}) {
     const current = this.records.get(id);
     if (!current) return undefined;
     const updatedAt = new Date().toISOString();
@@ -128,6 +128,18 @@ export class ActivityHub {
     }
     this.broadcastFeed({ type: 'activity-clear', workspaceId });
     return { cleared: ids.length, workspaceId };
+  }
+
+  async clearAll() {
+    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = undefined; }
+    this.flush(); await this.writeChain;
+    const ids = [...this.records.keys()];
+    this.records.clear(); this.snapshots.clear(); this.history.clear(); this.sequences.clear(); this.pendingWrites.clear(); this.pendingJournal = [];
+    const directory = join(config.stateDir, 'tasks'); await mkdir(directory, { recursive: true });
+    const files = await readdir(directory).catch(() => []); await Promise.all(files.filter((name) => name.endsWith('.jsonl')).map((name) => rm(join(directory, name), { force: true })));
+    await writeFile(join(config.stateDir, 'activity.jsonl'), '', 'utf8');
+    this.broadcastFeed({ type: 'activity-clear', workspaceId: '*' });
+    return { cleared: ids.length, scope: 'all' as const };
   }
 
   getTask(id: string) { return this.snapshots.get(id); }

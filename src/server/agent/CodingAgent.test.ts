@@ -25,6 +25,10 @@ describe('adaptive coding profile', () => {
     expect(CODING_AGENT_SYSTEM).toMatch(/do not edit application files/i);
     expect(CODING_AGENT_SYSTEM).toMatch(/only when the user explicitly asked to place or use the asset/i);
   });
+  it('requires stable selection identifiers on every new semantic DOM element', () => {
+    expect(CODING_AGENT_SYSTEM).toMatch(/Every newly created user-visible semantic DOM element must have.*data-cowork-id/i);
+    expect(CODING_AGENT_SYSTEM).toMatch(/Never generate duplicate data-cowork-id values/i);
+  });
   it('narrows and enforces delegated media kinds from scoped registry grants', () => {
     const settings = { codingAgent: { mediaGeneration: true, dependencies: 'allow', validation: 'standard' } } as any;
     const agent = { id: 'animation', name: 'Animator', revision: 1, enabledToolIds: ['media.generate_animation'] };

@@ -119,9 +119,23 @@ export class WorkspaceManager {
       await page.goto(this.target, { waitUntil: 'domcontentloaded', timeout: 20_000 });
       let box: { x: number; y: number; width: number; height: number } | null;
       if (selection.kind === 'dom') {
-        if (!selection.selector || selection.selector.length > 2000) throw new Error('A valid selected-element selector is required.');
-        const locator = page.locator(selection.selector).first(); await locator.waitFor({ state: 'visible', timeout: 5_000 }); await locator.scrollIntoViewIfNeeded(); box = await locator.boundingBox();
-        if (!box) throw new Error(`The selected element is no longer visible: ${selection.selector}`);
+        box = null;
+        const locators = [selection.selector && selection.selector.length <= 2000 ? selection.selector : '', selection.xpath ? `xpath=${selection.xpath}` : ''].filter(Boolean);
+        for (const query of locators) {
+          try {
+            const locator = page.locator(query).first(); if (!await locator.count()) continue;
+            await locator.waitFor({ state: 'visible', timeout: 2_500 }); await locator.scrollIntoViewIfNeeded(); box = await locator.boundingBox(); if (box) break;
+          } catch { /* try the next locator representation */ }
+        }
+        if (!box && selection.domPath?.length) box = await page.evaluate((path) => {
+          let node: Element | Document = document;
+          for (const step of path) {
+            const child = node.children.item(step.childIndex); if (!child || child.tagName.toLowerCase() !== step.tagName) return null; node = child;
+          }
+          if (!(node instanceof Element)) return null; node.scrollIntoView({ block: 'center', inline: 'center' }); const rect = node.getBoundingClientRect();
+          return rect.width && rect.height ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null;
+        }, selection.domPath);
+        if (!box) throw new Error(`The selected element is no longer visible using its CSS selector, XPath, or indexed DOM path: ${selection.selector}`);
       } else {
         await page.waitForFunction(() => {
           const adapter = (window as any).coworkCanvas; return adapter && typeof adapter.getLayer === 'function';

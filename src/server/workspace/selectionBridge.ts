@@ -19,7 +19,7 @@ export const selectionBridge = String.raw`(() => {
 
   const selectStyle = document.createElement('style');
   selectStyle.setAttribute('data-cowork-runtime', 'selection-style');
-  selectStyle.textContent = 'html[data-cowork-select-dom="true"] [data-cowork-id]{pointer-events:auto!important}';
+  selectStyle.textContent = 'html[data-cowork-select-dom="true"] body *:not([data-cowork-runtime]){pointer-events:auto!important}';
   document.documentElement.appendChild(selectStyle);
 
   function draw(value) {
@@ -34,26 +34,46 @@ export const selectionBridge = String.raw`(() => {
   }
 
   function escape(value) { return CSS.escape(String(value)); }
-  function selectorFor(element) {
-    if (element.hasAttribute('data-cowork-id')) return '[data-cowork-id="' + escape(element.getAttribute('data-cowork-id')) + '"]';
-    if (element.id) return '#' + escape(element.id);
+  function unique(selector) { try { return document.querySelectorAll(selector).length === 1; } catch { return false; } }
+  function locatorFor(element) {
+    const coworkId = element.getAttribute('data-cowork-id'); const coworkSelector = coworkId && '[data-cowork-id="' + escape(coworkId) + '"]';
+    if (coworkSelector && unique(coworkSelector)) return { selector: coworkSelector, strategy: 'data-cowork-id' };
+    const idSelector = element.id && '#' + escape(element.id);
+    if (idSelector && unique(idSelector)) return { selector: idSelector, strategy: 'id' };
+    const testId = element.getAttribute('data-testid'); const testSelector = testId && '[data-testid="' + escape(testId) + '"]';
+    if (testSelector && unique(testSelector)) return { selector: testSelector, strategy: 'data-testid' };
     const parts = []; let node = element;
-    while (node && node.nodeType === 1 && node !== document.documentElement) {
-      let part = node.tagName.toLowerCase(); const testId = node.getAttribute('data-testid');
-      if (testId) { parts.unshift(part + '[data-testid="' + escape(testId) + '"]'); break; }
-      const parent = node.parentElement;
+    while (node && node.nodeType === 1) {
+      let part = node.tagName.toLowerCase(); const parent = node.parentElement;
       if (parent) { const siblings = Array.from(parent.children).filter((child) => child.tagName === node.tagName); if (siblings.length > 1) part += ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')'; }
-      parts.unshift(part); node = parent; if (parts.length >= 7) break;
+      parts.unshift(part); const selector = parts.join(' > '); if (unique(selector)) return { selector, strategy: 'dom-path' };
+      node = parent;
     }
-    return parts.join(' > ');
+    return { selector: parts.join(' > '), strategy: 'dom-path' };
+  }
+  function domPathFor(element) {
+    const path = []; let node = element;
+    while (node && node.nodeType === 1) {
+      const parent = node.parentElement; path.unshift({ tagName: node.tagName.toLowerCase(), childIndex: parent ? Array.from(parent.children).indexOf(node) : 0 }); node = parent;
+    }
+    return path;
+  }
+  function xpathFor(element) {
+    const parts = []; let node = element;
+    while (node && node.nodeType === 1) {
+      const parent = node.parentElement; const sameTag = parent ? Array.from(parent.children).filter((child) => child.tagName === node.tagName) : [node];
+      parts.unshift(node.tagName.toLowerCase() + (sameTag.length > 1 ? '[' + (sameTag.indexOf(node) + 1) + ']' : '')); node = parent;
+    }
+    return '/' + parts.join('/');
   }
 
   function describeDom(element) {
-    const selector = selectorFor(element); const attributes = {};
+    const locator = locatorFor(element); const selector = locator.selector; const attributes = {};
     for (const attribute of Array.from(element.attributes).slice(0, 20)) if (!attribute.name.startsWith('data-cowork-runtime')) attributes[attribute.name] = attribute.value.slice(0, 500);
-    const rect = element.getBoundingClientRect(); const authoredId = element.getAttribute('data-cowork-id') || element.id;
+    const rect = element.getBoundingClientRect(); const authoredId = locator.strategy === 'data-cowork-id' ? element.getAttribute('data-cowork-id') : locator.strategy === 'id' ? element.id : '';
     return {
-      kind: 'dom', identifier: authoredId ? 'authored:' + authoredId : 'selector:' + selector, selector,
+      kind: 'dom', identifier: authoredId ? 'authored:' + authoredId : 'selector:' + selector, selector, locatorStrategy: locator.strategy,
+      xpath: xpathFor(element), domPath: domPathFor(element),
       tagName: element.tagName.toLowerCase(), text: (element.innerText || element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 2000), attributes,
       outerHTML: element.outerHTML.slice(0, 6000), parentText: (element.parentElement && (element.parentElement.innerText || element.parentElement.textContent) || '').trim().replace(/\s+/g, ' ').slice(0, 2000),
       rect: rounded(rect)

@@ -47,15 +47,15 @@ flowchart LR
 
 ## Live proxy and client surfaces
 
-The client sends microphone audio, tool responses, and optional workspace frames through `/api/live`. [`LiveProxy.ts`](../src/server/live/LiveProxy.ts) opens the upstream Gemini Live session so `GEMINI_API_KEY` never needs to enter browser code. Separate WebSockets stream activity and durable work events.
+The client sends microphone audio, tool responses, and optional workspace frames through `/api/live`. [`LiveProxy.ts`](../src/server/live/LiveProxy.ts) opens the upstream Gemini Live session so `GEMINI_API_KEY` never needs to enter browser code. Live exposes one workspace-action handoff; the application attaches a stable user-turn ID and authoritative raw text/context to `/api/assistant/requests`. Separate WebSockets stream activity and durable work events.
 
 The preview gateway injects the selection bridge into rendered HTML. DOM and Mixed modes expose the whole composited page to vision; Canvas mode restricts capture to the primary canvas and depends on semantic canvas adapter methods.
 
 ## Work orchestration
 
-[`WorkStore.ts`](../src/server/orchestration/WorkStore.ts) stores work snapshots, append-only events, and idempotent operation results in SQLite with WAL mode. Requests have normalized fingerprints for duplicate detection. The orchestrator routes queued work, records attempts, handles questions and plan approval, and returns interrupted runs to the queue on startup.
+[`WorkStore.ts`](../src/server/orchestration/WorkStore.ts) stores work snapshots, append-only events, idempotent operation results, and persisted Assistant turn results in SQLite with WAL mode. The Assistant intake serializes decisions per workspace, sees the active queue before changing it, and maps a handoff to create, reuse, update, cancel, answer, approve, report, ignore, reject, clarify, or fast edit. The orchestrator executes the persisted route, records attempts, handles questions and plan approval, and returns interrupted runs to the queue on startup.
 
-Focused Live edits bypass the durable worker pool but still pass through workspace change services, mutation locking, publication, and Git recording. Durable coding runs use the concurrent runner; planning is read-only and does not acquire the workspace mutation lock for its model loop.
+Assistant fast edits bypass the durable worker pool but use a restricted server-side worker and still pass through workspace change services, mutation locking, rollback, publication, and Git recording. Durable coding runs use the concurrent runner; planning is read-only and does not acquire the workspace mutation lock for its model loop.
 
 ## Workspace lifecycle and Git
 
@@ -74,7 +74,7 @@ Paths are relative to the repository root unless noted.
 | `workspace/projects/<workspace-id>/failed/` | Failed attempts and recovery backups |
 | `.cowork/workspaces.json` | Workspace catalog and active workspace |
 | `.cowork/workspaces/<workspace-id>/` | Workspace Git repository, settings, worktrees, and workspace state |
-| `.cowork/orchestration.sqlite` | Durable work snapshots, events, and idempotent operation results |
+| `.cowork/orchestration.sqlite` | Durable work snapshots, events, task operations, and idempotent Assistant turn results |
 | `.cowork/agents/config.json` | Agent profiles, routing, contexts, skills, and secret metadata/grants |
 | `.cowork/workspaces/<workspace-id>/media-jobs/` | Workspace media-job state and temporary artifacts |
 | `.cowork/media-jobs/` | Assistant portrait-processing temporary state and legacy-compatible media state |
@@ -86,7 +86,7 @@ Legacy singleton workspace data is migrated into the multi-workspace layout duri
 
 ## Sandbox and trust boundaries
 
-Generated-project commands are executed by the host server through the cached `cowork-sandbox:local` Docker image. The project root is mounted at `/workspace`, and each disposable container receives two CPUs, 2 GB memory, and a 256-process limit. Ordinary commands use `--network none`. Dependency installation uses bridge networking temporarily so package registries are reachable. The minimal Alpine image includes Node.js, npm, and the `file` utility; Python is intentionally absent. The current Docker invocation does not add a read-only root filesystem, a non-root user, dropped capabilities, or `no-new-privileges`; treat those as potential hardening work, not current guarantees.
+Generated-project commands are executed by the host server through the cached `cowork-sandbox:local` Docker image. The project root is mounted at `/workspace`, and each disposable container receives two CPUs, 2 GB memory, and a 256-process limit. Ordinary commands use `--network none`. Dependency installation uses bridge networking temporarily so package registries are reachable. The minimal Alpine image includes Node.js, npm, the `file` utility, Fontconfig with DejaVu fonts, and a sandbox-owned Sharp fallback for workspace media scripts; newly scaffolded workspaces also declare Sharp as a project dependency. Python is intentionally absent. The current Docker invocation does not add a read-only root filesystem, a non-root user, dropped capabilities, or `no-new-privileges`; treat those as potential hardening work, not current guarantees.
 
 Preview containers are a separate boundary. They use bridge networking, two CPUs, 2 GB memory, a 256-process limit, and an ephemeral container port bound to `127.0.0.1`. Browser inspection checks console/page errors before publication in standard validation.
 

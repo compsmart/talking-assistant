@@ -27,4 +27,16 @@ describe('durable work store', () => {
       expect(() => store.operation('same', { value: 2 }, () => 3)).toThrow(/different arguments/i); store.close();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
+
+  it('persists one Assistant result per authoritative user turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cowork-assistant-turn-'));
+    try {
+      const store = new WorkStore(join(root, 'work.sqlite')); const signature = { userText: 'Generate space symbols' };
+      expect(store.assistantResult('workspace-1', 'turn-1', signature)).toBeUndefined();
+      store.saveAssistantResult('workspace-1', 'turn-1', signature, { disposition: 'created', message: 'Queued' });
+      expect(store.assistantResult('workspace-1', 'turn-1', signature)).toEqual({ disposition: 'created', message: 'Queued' });
+      expect(() => store.assistantResult('workspace-1', 'turn-1', { userText: 'Different' })).toThrow(/different user input/i);
+      store.close();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });

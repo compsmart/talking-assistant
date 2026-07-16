@@ -1,8 +1,62 @@
 export interface LiveFunctionCall { id: string; name: string; args?: Record<string, unknown> }
+export interface LiveUserTurn { id: string; text: string }
 export type LiveStatus = 'offline' | 'connecting' | 'ready' | 'closed' | 'error';
-const MUTATING_TOOLS = new Set(['submit_work', 'update_work', 'cancel_work', 'approve_work_plan', 'answer_work_question', 'delegate_coding_task', 'create_implementation_plan', 'execute_implementation_plan', 'respond_to_planning_continuation', 'copy_reference_workspace_file', 'edit_workspace_files']);
+export type LiveActivityKind = 'thinking' | 'inspecting' | 'editing' | 'opening' | 'delegating' | 'planning' | 'starting' | 'updating' | 'cancelling' | 'approving' | 'responding';
+export interface LiveActivity { kind: LiveActivityKind; label: string }
+const MUTATING_TOOLS = new Set(['delegate_to_assistant']);
+
+const TOOL_ACTIVITIES: Record<string, LiveActivity> = {
+  delegate_to_assistant: { kind: 'delegating', label: 'Delegating' },
+  submit_work: { kind: 'delegating', label: 'Delegating' },
+  delegate_coding_task: { kind: 'delegating', label: 'Delegating' },
+  create_implementation_plan: { kind: 'planning', label: 'Planning' },
+  execute_implementation_plan: { kind: 'starting', label: 'Starting implementation' },
+  respond_to_planning_continuation: { kind: 'planning', label: 'Resuming plan' },
+  update_work: { kind: 'updating', label: 'Updating task' },
+  cancel_work: { kind: 'cancelling', label: 'Cancelling task' },
+  approve_work_plan: { kind: 'approving', label: 'Approving plan' },
+  answer_work_question: { kind: 'responding', label: 'Answering task' },
+  get_work_status: { kind: 'inspecting', label: 'Checking progress' },
+  get_agent_run_status: { kind: 'inspecting', label: 'Checking progress' },
+  get_coding_task_status: { kind: 'inspecting', label: 'Checking progress' },
+  get_selected_element_context: { kind: 'inspecting', label: 'Inspecting selection' },
+  get_selected_files_context: { kind: 'inspecting', label: 'Inspecting files' },
+  get_workspace_settings: { kind: 'inspecting', label: 'Inspecting settings' },
+  capture_selected_element_image: { kind: 'inspecting', label: 'Capturing selection' },
+  list_workspace_files: { kind: 'inspecting', label: 'Listing files' },
+  search_workspace_files: { kind: 'inspecting', label: 'Searching files' },
+  read_workspace_file: { kind: 'inspecting', label: 'Reading file' },
+  list_reference_workspace_files: { kind: 'inspecting', label: 'Listing reference files' },
+  search_reference_workspace_files: { kind: 'inspecting', label: 'Searching reference files' },
+  read_reference_workspace_file: { kind: 'inspecting', label: 'Reading reference file' },
+  copy_reference_workspace_file: { kind: 'editing', label: 'Copying reference file' },
+  edit_workspace_files: { kind: 'editing', label: 'Editing workspace' },
+  open_ui_component: { kind: 'opening', label: 'Opening interface' },
+  set_expression: { kind: 'updating', label: 'Changing expression' },
+  play_gesture: { kind: 'updating', label: 'Playing gesture' },
+};
+
+export function liveToolActivity(name: string): LiveActivity {
+  return TOOL_ACTIVITIES[name] || { kind: 'updating', label: 'Working' };
+}
+
+/** Remove internal identifiers from application-authored text before it reaches the voice model. */
+export function speechSafeText(value: string) {
+  return value
+    .replace(/\b(?:task|work|run|job|request|question|workspace|agent)(?:\s+(?:id|identifier))?\s*[:#]?\s*[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, 'the task')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, 'the task')
+    .replace(/\b(?:sha(?:256)?|hash|version)\s*[:#]?\s*[0-9a-f]{20,}\b/gi, 'the current version')
+    .replace(/\s+([,.!?;:])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
 
 const FUNCTION_DECLARATIONS = [
+  {
+    name: 'delegate_to_assistant',
+    description: 'Hand the current actionable user request to the authoritative Assistant. Call exactly once for any request that may inspect, create, edit, generate, plan, update, cancel, approve, answer, or report workspace work. The application attaches the raw user turn and selected context; your note is advisory only.',
+    parameters: { type: 'OBJECT', properties: { note: { type: 'STRING', description: 'Optional concise visual or conversational context that is not present in the raw user words.' } } },
+  },
   {
     name: 'submit_work',
     description: 'Delegate substantial implementation or media work to your internal orchestration layer, which selects the appropriate configured agent and its assigned skills. Do not use this for a small localized one-file edit when edit_workspace_files is available. Returns immediately after acceptance or duplicate detection while you remain available for conversation.',
@@ -158,11 +212,13 @@ const FUNCTION_DECLARATIONS = [
   },
 ] as any[];
 
-function liveTools(settings: WorkspaceSettings) { return [{ functionDeclarations: FUNCTION_DECLARATIONS.filter((tool) => {
-  if (!settings.liveAgent.directFileEdits && ['edit_workspace_files', 'copy_reference_workspace_file'].includes(tool.name)) return false;
-  if (!settings.codingAgent.mediaGeneration && tool.name === 'generate_image_asset') return false;
-  return true;
-}) }]; }
+const ASSISTANT_OWNED_TOOLS = new Set([
+  'submit_work', 'update_work', 'cancel_work', 'get_work_status', 'approve_work_plan', 'answer_work_question',
+  'delegate_coding_task', 'create_implementation_plan', 'execute_implementation_plan', 'respond_to_planning_continuation',
+  'get_agent_run_status', 'get_coding_task_status', 'copy_reference_workspace_file', 'edit_workspace_files',
+]);
+
+function liveTools(_settings: WorkspaceSettings) { return [{ functionDeclarations: FUNCTION_DECLARATIONS.filter((tool) => !ASSISTANT_OWNED_TOOLS.has(tool.name)) }]; }
 
 export function liveSetup(settings: WorkspaceSettings, assistant: AssistantSettings, sessionHandle = '', catalog?: WorkspaceCatalog) {
   return {
@@ -175,15 +231,14 @@ export function liveSetup(settings: WorkspaceSettings, assistant: AssistantSetti
 }
 
 export function systemPrompt(settings: WorkspaceSettings, assistant: AssistantSettings, catalog?: WorkspaceCatalog) {
-  const delegationRule = 'Delegate substantial implementation and all standalone media work with submit_work so the configured agent and assigned skills own execution. ';
+  const delegationRule = 'For every actionable workspace request, call delegate_to_assistant exactly once. The Assistant is the sole authority for task lifecycle, planning, edits, media generation, routing, status, approvals, and task questions. ';
   const mode = settings.mode === 'canvas'
     ? 'Canvas mode is active. Continuous vision contains only the primary HTML5 canvas and user selections are semantic canvas layers.'
     : settings.mode === 'dom'
       ? 'DOM mode is active. Continuous vision contains the complete rendered page, but user selections are DOM elements only.'
       : 'Mixed mode is active. Continuous vision contains the complete rendered page and selections may be DOM elements or semantic canvas layers.';
-  const edits = settings.liveAgent.directFileEdits ? 'For any small, localized one-file code, text, style, or configuration change, locate and read the target, then use one atomic edit_workspace_files call. Make the edit immediately and publish the workspace; do not submit it to the durable agent pipeline, create a plan, or request tests or validation.' : 'Direct file editing is disabled; use the coding workflow for mutations. Use planning only when the user explicitly requests it.';
   const workspaceContext = catalog ? ` The active workspace is ${catalog.workspaces.find((item) => item.active)?.name}. Other known workspace names are: ${catalog.workspaces.filter((item) => !item.active).map((item) => item.name).join(', ') || 'none'}. Other workspace files are available only when the current user request explicitly names that workspace.` : '';
-  const base = `You are the live cowork agent represented by a floating talking wireframe head. ${mode}${workspaceContext} You receive an authoritative persisted-workspace image on connect and continuous frames when vision is enabled. Be concise, warm, and practical. A user may select a rendered element or workspace files. Call get_selected_element_context when they refer to a selected DOM element or canvas layer. Call get_selected_files_context for selected files, uploads, media, or reference images. You can list, search, and read workspace files. Keep these surfaces distinct: “canvas,” Canvas workspace mode, and selected semantic canvas layers refer to the generated workspace's HTML5 canvas, whose behavior is changed through workspace files; “Image Editor” refers only to the separate shell raster-composition window. Never open the Image Editor or generate an image merely because a workspace change mentions canvas. Use open_ui_component with image_editor only when the user explicitly asks for the Image Editor or static raster composition. While the Image Editor is open, your image input is its current static composition instead of the generated workspace. Submit standalone image generation, background removal, sprite extraction, animation, video, music, and sound work through submit_work so the orchestration Assistant selects the configured Media Agent and loads its assigned skills. Use selected workspace images as inputs when appropriate. Generating or processing an asset does not authorize inserting it into the workspace page, HTML5 canvas, or Image Editor; request application integration only when the user explicitly asks for it. If mode, selection, and explicit wording do not resolve whether “canvas” means the workspace's HTML5 canvas or an image in the Image Editor, ask “Do you mean the workspace's HTML5 canvas, or an image in the Image Editor?” and call no mutating, editor-opening, or generation tool until the user answers. ${edits} Delegate substantial or multi-file implementation work with submit_work using strategy auto. Never start the planner, use plan_first, or use plan_only unless the user explicitly asks for a plan or a reviewed plan-first workflow; architectural complexity or uncertainty alone is not permission to plan. Update or cancel the exact durable task when the user changes direction. Work starts return immediately, so remain available and use get_work_status for progress. The internal orchestration Assistant and its workers are parts of you: never acknowledge, name, or refer to an assistant or coordinator. Say “I’m doing that now,” “I already have that in progress,” or “I finished it,” always in first person. The UI may show technical worker activity, but do not expose internal delegation in conversation. Selected element and file context is attached automatically. Set includeWorkspacePreview only when broader visual context materially helps. Report only confirmed results and paths.`;
+  const base = `You are the live cowork agent represented by a floating talking wireframe head. ${mode}${workspaceContext} You receive an authoritative persisted-workspace image on connect and continuous frames when vision is enabled. Be concise, warm, and practical. Your role is conversation and shell UI presentation, not workspace execution or task management. You may inspect read-only context, open the File Manager or Image Editor when explicitly requested, and use expressions or gestures. Never edit, generate, plan, submit, update, cancel, approve, answer task questions, or infer task status yourself. For any actionable workspace or task request, call delegate_to_assistant once and wait for its result. The application supplies the exact raw user turn, selected element, selected files, and authorization context; use the optional note only for concise visual context the raw words omit. Speak the returned message faithfully and do not invent task IDs, progress, paths, or completion claims. Never say, spell out, or read aloud a GUID, UUID, task ID, run ID, job ID, request ID, workspace ID, question ID, hash, or other internal identifier, even when one appears in tool output or context; refer naturally to “the task,” “the file,” or “the current version” instead. If you accidentally call the handoff more than once, the same user turn remains one idempotent request. Keep these surfaces distinct: “canvas,” Canvas workspace mode, and selected semantic canvas layers refer to the generated workspace's HTML5 canvas; “Image Editor” refers only to the separate shell raster-composition window. Use open_ui_component with image_editor only when the user explicitly asks to open or operate that UI. If wording does not resolve which canvas they mean, ask “Do you mean the workspace's HTML5 canvas, or an image in the Image Editor?” before delegating. Planning must only be requested when the user explicitly asks for a plan. The internal Assistant and workers are parts of you: speak in first person and do not expose internal orchestration names.`;
   const personality = assistant.personalityPrompt.trim();
   return personality ? `${delegationRule}${base}\n\n[USER-CONFIGURED PERSONALITY AND SPEAKING STYLE]\n${personality}` : `${delegationRule}${base}`;
 }
@@ -200,17 +255,21 @@ export class LiveClient {
   onUserInput?: (text: string) => void;
   onInterrupted?: () => void;
   onToolCalls?: (calls: LiveFunctionCall[]) => Promise<void>;
+  onActivity?: (activity?: LiveActivity) => void;
   onGoAway?: (timeLeft?: string) => void;
   private restartPending = false;
   private catalog?: WorkspaceCatalog;
   private inputTranscript = '';
+  private userTurn?: LiveUserTurn;
   private mutationChain: Promise<unknown> = Promise.resolve();
   private toolCalls = new Map<string, { signature: string; promise: Promise<unknown> }>();
+  private thinking = false;
+  private activeTools = new Map<string, LiveActivity>();
 
   constructor(private settings: WorkspaceSettings, private assistant: AssistantSettings) {}
   configure(settings: WorkspaceSettings, catalog?: WorkspaceCatalog) { this.settings = settings; if (catalog) this.catalog = catalog; }
   configureAssistant(settings: AssistantSettings) { this.assistant = settings; }
-  resetWorkspace(settings: WorkspaceSettings, catalog: WorkspaceCatalog) { this.settings = settings; this.catalog = catalog; this.lastSessionHandle = ''; this.restartPending = false; this.inputTranscript = ''; this.toolCalls.clear(); this.mutationChain = Promise.resolve(); this.close(false); }
+  resetWorkspace(settings: WorkspaceSettings, catalog: WorkspaceCatalog) { this.settings = settings; this.catalog = catalog; this.lastSessionHandle = ''; this.restartPending = false; this.inputTranscript = ''; this.userTurn = undefined; this.toolCalls.clear(); this.mutationChain = Promise.resolve(); this.clearActivity(); this.close(false); }
   restartForConfiguration() { this.lastSessionHandle = ''; this.restartPending = true; this.scheduleRestart(); }
 
   connect() {
@@ -226,33 +285,39 @@ export class LiveClient {
       const raw = typeof event.data === 'string' ? event.data : await event.data.text();
       try { this.handle(JSON.parse(raw)); } catch { /* ignore malformed upstream frames */ }
     };
-    ws.onerror = () => this.setStatus('error', 'Live connection failed');
-    ws.onclose = (event) => { this.ready = false; this.setStatus('closed', event.reason || `code ${event.code}`); };
+    ws.onerror = () => { this.clearActivity(); this.setStatus('error', 'Live connection failed'); };
+    ws.onclose = (event) => { this.ready = false; this.clearActivity(); this.setStatus('closed', event.reason || `code ${event.code}`); };
   }
 
   private handle(message: any) {
     if (message.setupComplete !== undefined) { this.ready = true; this.setStatus('ready'); return; }
-    if (message.error) { this.setStatus('error', message.error.message || 'Gemini Live error'); return; }
+    if (message.error) { this.clearActivity(); this.setStatus('error', message.error.message || 'Gemini Live error'); return; }
     if (message.sessionResumptionUpdate?.newHandle) this.lastSessionHandle = message.sessionResumptionUpdate.newHandle;
     if (message.goAway) { this.onGoAway?.(message.goAway.timeLeft); return; }
     if (message.toolCall?.functionCalls?.length) { void this.onToolCalls?.(message.toolCall.functionCalls); return; }
     const content = message.serverContent;
     if (!content) return;
-    if (content.interrupted) this.onInterrupted?.();
+    if (content.interrupted) { this.clearActivity(); this.onInterrupted?.(); }
     if (content.inputTranscription?.text) {
       const text = String(content.inputTranscription.text); this.inputTranscript = text.startsWith(this.inputTranscript) ? text : `${this.inputTranscript}${this.inputTranscript && !/^\s/.test(text) ? ' ' : ''}${text}`;
+      if (!this.userTurn) this.userTurn = { id: crypto.randomUUID(), text: this.inputTranscript };
+      else this.userTurn.text = this.inputTranscript;
       this.onCaption?.(text, true); this.onUserInput?.(this.inputTranscript);
     }
-    if (content.outputTranscription?.text) this.onCaption?.(content.outputTranscription.text, false);
+    if (content.outputTranscription?.text) { this.setThinking(false); this.onCaption?.(content.outputTranscription.text, false); }
     for (const part of content.modelTurn?.parts || []) {
-      if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) this.onAudio?.(decodePcm(part.inlineData.data));
+      if (part.inlineData?.mimeType?.startsWith('audio/pcm') && part.inlineData.data) { this.setThinking(false); this.onAudio?.(decodePcm(part.inlineData.data)); }
     }
-    if (content.turnComplete) this.inputTranscript = '';
+    if (content.turnComplete) { this.inputTranscript = ''; this.userTurn = undefined; this.clearActivity(); }
   }
+
+  beginUserTurn(text: string) { this.userTurn = { id: crypto.randomUUID(), text: text.trim() }; }
+  currentUserTurn() { return this.userTurn ? { ...this.userTurn } : undefined; }
 
   sendText(text: string) {
     if (!this.canSend()) return false;
     this.ws!.send(JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } }));
+    this.setThinking(true);
     return true;
   }
 
@@ -269,11 +334,13 @@ export class LiveClient {
   sendAudioEnd() {
     if (!this.canSend()) return;
     this.ws!.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    this.setThinking(true);
   }
 
   sendToolResponse(responses: Array<{ id: string; name: string; response: unknown }>) {
     if (!this.ready || this.ws?.readyState !== WebSocket.OPEN) return false;
     this.ws.send(JSON.stringify({ toolResponse: { functionResponses: responses } }));
+    this.setThinking(true);
     this.scheduleRestart();
     return true;
   }
@@ -286,10 +353,11 @@ export class LiveClient {
         return cached.promise as Promise<T>;
       }
       const start = () => {
+        this.startTool(call);
         void reportLiveActivity(call, 'running');
         return execute(call).then((result) => {
-          const error = (result as any)?.response?.error; void reportLiveActivity(call, error ? 'failed' : 'succeeded', error); return result;
-        }, (error) => { void reportLiveActivity(call, 'failed', (error as Error).message); throw error; });
+          const error = (result as any)?.response?.error; this.finishTool(call.id); void reportLiveActivity(call, error ? 'failed' : 'succeeded', error); return result;
+        }, (error) => { this.finishTool(call.id); void reportLiveActivity(call, 'failed', (error as Error).message); throw error; });
       };
       const promise = MUTATING_TOOLS.has(call.name) ? this.mutationChain.then(start, start) : start();
       if (MUTATING_TOOLS.has(call.name)) this.mutationChain = promise.then(() => undefined, () => undefined);
@@ -301,12 +369,21 @@ export class LiveClient {
 
   close(report = true) {
     this.ready = false;
+    this.clearActivity();
     if (this.ws) { this.ws.onclose = null; this.ws.close(); this.ws = null; }
     if (report) this.setStatus('offline');
   }
 
   private canSend() { return !this.inputBlocked && this.ready && this.ws?.readyState === WebSocket.OPEN; }
   private setStatus(status: LiveStatus, detail?: string) { this.status = status; this.onStatus?.(status, detail); }
+  private setThinking(value: boolean) { this.thinking = value; this.publishActivity(); }
+  private startTool(call: LiveFunctionCall) { this.thinking = false; this.activeTools.set(call.id, liveToolActivity(call.name)); this.publishActivity(); }
+  private finishTool(id: string) { this.activeTools.delete(id); this.publishActivity(); }
+  private clearActivity() { this.thinking = false; this.activeTools.clear(); this.publishActivity(); }
+  private publishActivity() {
+    const tools = [...this.activeTools.values()];
+    this.onActivity?.(tools.at(-1) || (this.thinking ? { kind: 'thinking', label: 'Thinking' } : undefined));
+  }
   private scheduleRestart() {
     if (!this.restartPending || this.inputBlocked) return;
     window.setTimeout(() => {

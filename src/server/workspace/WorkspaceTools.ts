@@ -143,8 +143,8 @@ export class WorkspaceTools {
     const guidance = await readFile(resolve(root, 'AGENTS.md'), 'utf8').then((text) => text.slice(0, 12 * 1024)).catch(() => '');
     const selection = input.selectedElement;
     const rankedQueries = unique([
-      selection?.attributes?.['data-cowork-id'], selection?.identifier, selection?.selector?.match(/#[A-Za-z][\w-]*/)?.[0],
-      ...(selection?.attributes ? Object.entries(selection.attributes).filter(([key]) => key === 'id' || key === 'class').flatMap(([, value]) => String(value).split(/\s+/)) : []),
+      selection?.attributes?.['data-cowork-id'], selection?.identifier?.startsWith('authored:') ? selection.identifier.slice('authored:'.length) : undefined, selection?.selector?.match(/#[A-Za-z][\w-]*/)?.[0],
+      ...(selection?.attributes ? Object.entries(selection.attributes).filter(([key]) => ['id', 'class', 'name', 'role', 'aria-label', 'title', 'alt'].includes(key)).flatMap(([, value]) => String(value).split(/\s+/)) : []),
       selection?.layerId, selection?.canvasId, selection?.text && `"${String(selection.text).trim()}"`, ...objectiveKeywords(input.objective),
     ]).filter(Boolean).slice(0, 8) as string[];
     const located = rankedQueries.length ? await this.locateCode(rankedQueries, 12) : { matches: [] as any[] };

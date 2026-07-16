@@ -1,11 +1,21 @@
 import { GoogleGenAI } from '@google/genai';
-import type { AgentProfile, AgentStage, WorkItemSnapshot } from '../../shared/protocol.js';
+import type { AgentProfile, AgentStage, AssistantIntakeRequest, WorkDispatchKind, WorkItemSnapshot, WorkUpdateMode } from '../../shared/protocol.js';
 import { config } from '../config.js';
 import type { AgentConfigService } from '../agents/AgentConfigService.js';
 import type { AgentRuntimeProfile } from '../agent/CodingAgent.js';
 import { AgentRouter, type AgentRoutingDecision, type RoutableAgentProfile } from './AgentRouter.js';
 
 export interface CoordinationDecision { action: 'code' | 'media' | 'plan' | 'duplicate'; duplicateOf?: string; writeScope: string[]; reason: string }
+export interface AssistantManagementDecision {
+  action: 'create' | 'reuse' | 'update' | 'cancel' | 'answer' | 'approve' | 'status' | 'ignore' | 'clarify' | 'reject';
+  targetId?: string;
+  questionId?: string;
+  objective?: string;
+  successCriteria?: string[];
+  execution?: 'fast' | WorkDispatchKind;
+  updateMode?: WorkUpdateMode;
+  message: string;
+}
 export type AgentSelectionDecision =
   | { status: 'selected'; agent: AgentRuntimeProfile; reason: string; candidates: Array<{ id: string; name: string; score: number }> }
   | { status: 'tie'; reason: string; candidates: Array<{ id: string; name: string; score: number }> }
@@ -25,9 +35,50 @@ Rules:
 - writeScope is advisory and must be conservative; use **/* when the owning paths cannot be known from the request.
 - do not write code, claim completion, or explain this decision to the user.`;
 
+const MANAGEMENT_SYSTEM = `You are the authoritative task manager for a local coding application. A conversational Live agent forwards one user turn to you. You alone decide whether to create, reuse, update, cancel, answer, approve, report, ignore, clarify, or reject work.
+
+Return JSON only:
+{"action":"create|reuse|update|cancel|answer|approve|status|ignore|clarify|reject","targetId":"optional exact task id","questionId":"optional exact question id","objective":"normalized requested outcome","successCriteria":["observable result"],"execution":"fast|code|media|plan","updateMode":"append|correct|replace","message":"short first-person sentence for Live to speak"}
+
+Rules:
+- Treat the raw user text and application context as authoritative. A Live note is advisory only.
+- Inspect active work before creating anything. Reuse a non-terminal task with the same intended deliverable even when wording differs.
+- A correction, extension, or changed direction for existing work is update, not create. A stop request is cancel.
+- If more than one task plausibly matches an update, cancel, answer, or approval, return clarify and change nothing.
+- Use answer only for an exact open question and approve only for an exact task awaiting plan approval.
+- Use status for progress questions, ignore for conversation with no workspace action, and reject unsafe or impossible requests.
+- Use fast only for a clear localized edit to one existing code, text, style, or configuration file. Never use fast for media, dependencies, commands, file creation/deletion/rename/copy, multiple files, or uncertain targets.
+- Use media for standalone asset generation or image/media processing. Use code when media must be integrated into an app, page, game, component, or HTML5 canvas.
+- Use plan only when the user explicitly asks for a plan or reviewed plan-first workflow. Never infer planning from complexity.
+- Never force a duplicate unless the user explicitly asks for a separate variant or independent copy.
+- Do not claim work completed unless the supplied ledger says it completed.`;
+
 export class AssistantCoordinator {
   private client?: GoogleGenAI;
   constructor(private readonly agents?: AgentConfigService) { if (config.geminiKey) this.client = new GoogleGenAI({ apiKey: config.geminiKey }); }
+
+  async manage(request: AssistantIntakeRequest, history: WorkItemSnapshot[]): Promise<AssistantManagementDecision> {
+    const active = history.filter((item) => !['completed', 'failed', 'cancelled', 'superseded'].includes(item.status));
+    if (!this.client) return managementFallback(request, active);
+    try {
+      const response = await this.client.models.generateContent({
+        model: config.assistantModel,
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify({
+          request: {
+            rawUserText: request.userText,
+            liveNote: request.liveNote,
+            selectedElement: request.selectedElement ? { kind: request.selectedElement.kind, identifier: request.selectedElement.identifier, ...(request.selectedElement.kind === 'dom' ? { text: request.selectedElement.text, selector: request.selectedElement.selector, tagName: request.selectedElement.tagName } : { label: request.selectedElement.label, layerId: request.selectedElement.layerId }) } : undefined,
+            selectedFiles: request.selectedFiles,
+          },
+          work: history.slice(-30).map((item) => ({ id: item.id, status: item.status, revision: item.specRevision, objective: item.request.objective, criteria: item.request.successCriteria, plan: item.plan, questions: item.questions.filter((question) => !question.answeredAt).map((question) => ({ id: question.id, prompt: question.prompt, options: question.options })) })),
+        }) }] }],
+        config: { systemInstruction: MANAGEMENT_SYSTEM, responseMimeType: 'application/json', temperature: 0 },
+      } as any);
+      return validateManagementDecision(JSON.parse(String((response as any).text || '{}')), request, history);
+    } catch {
+      return managementFallback(request, active);
+    }
+  }
 
   async coordinate(work: WorkItemSnapshot, active: WorkItemSnapshot[]): Promise<CoordinationDecision> {
     if (work.strategy === 'plan_first' || work.strategy === 'plan_only') return { action: 'plan', writeScope: [], reason: 'The task explicitly requires planning.' };
@@ -132,6 +183,51 @@ function fallback(work: WorkItemSnapshot, active: WorkItemSnapshot[]): Coordinat
   if (duplicate) return { action: 'duplicate', duplicateOf: duplicate.id, writeScope: [], reason: 'An equivalent task is already active.' };
   if (isStandaloneMediaObjective(work.request.objective)) return { action: 'media', writeScope: ['assets/generated/**', 'assets/processed/**'], reason: 'Standalone media work routes to the configured Media Agent.' };
   return { action: 'code', writeScope: ['**/*'], reason: 'Automatic work routes directly to implementation; planning is user-requested only.' };
+}
+
+function validateManagementDecision(value: any, request: AssistantIntakeRequest, history: WorkItemSnapshot[]): AssistantManagementDecision {
+  const actions = new Set(['create', 'reuse', 'update', 'cancel', 'answer', 'approve', 'status', 'ignore', 'clarify', 'reject']);
+  const action = actions.has(String(value.action)) ? String(value.action) as AssistantManagementDecision['action'] : 'clarify';
+  const targetId = typeof value.targetId === 'string' ? value.targetId : undefined;
+  const target = targetId ? history.find((item) => item.id === targetId) : undefined;
+  if (['reuse', 'update', 'cancel', 'answer', 'approve'].includes(action) && !target) return { action: 'clarify', message: 'I need to know which task you mean before I change anything.' };
+  if (['update', 'cancel', 'answer', 'approve'].includes(action) && target && ['completed', 'failed', 'cancelled', 'superseded'].includes(target.status)) return { action: 'clarify', message: 'That task is no longer active; tell me whether you want a new task instead.' };
+  let execution = ['fast', 'code', 'media', 'plan'].includes(String(value.execution)) ? value.execution as AssistantManagementDecision['execution'] : undefined;
+  if (execution === 'plan' && !explicitlyRequestsPlan(request.userText)) execution = 'code';
+  const updateMode = ['append', 'correct', 'replace'].includes(String(value.updateMode)) ? value.updateMode as WorkUpdateMode : 'append';
+  const message = String(value.message || defaultManagementMessage(action)).trim().slice(0, 1000);
+  return {
+    action, targetId, questionId: typeof value.questionId === 'string' ? value.questionId : undefined,
+    objective: typeof value.objective === 'string' && value.objective.trim() ? value.objective.trim() : request.userText.trim(),
+    successCriteria: Array.isArray(value.successCriteria) ? value.successCriteria.map(String).map((item: string) => item.trim()).filter(Boolean).slice(0, 30) : [],
+    execution, updateMode, message,
+  };
+}
+
+function managementFallback(request: AssistantIntakeRequest, active: WorkItemSnapshot[]): AssistantManagementDecision {
+  const text = request.userText.trim(); const lower = text.toLocaleLowerCase();
+  if (!text) return { action: 'ignore', message: 'There is no request for me to act on.' };
+  if (/\b(status|progress|how(?:'s| is) .*going|what.*working on)\b/i.test(text)) return { action: 'status', message: active.length ? `I have ${active.length} active task${active.length === 1 ? '' : 's'}.` : 'I do not have any active tasks.' };
+  const exact = active.find((item) => normalize(item.request.objective) === normalize(text));
+  if (exact) return { action: 'reuse', targetId: exact.id, message: 'I already have that in progress.' };
+  if (/^(?:hi|hello|hey|thanks|thank you|okay|ok|great|nice)[.! ]*$/i.test(text)) return { action: 'ignore', message: 'Happy to help.' };
+  const execution: AssistantManagementDecision['execution'] = explicitlyRequestsPlan(text) ? 'plan' : isStandaloneMediaObjective(text) ? 'media' : isFastEditObjective(text, request.selectedFiles) ? 'fast' : 'code';
+  return { action: 'create', objective: text, successCriteria: [], execution, message: execution === 'fast' ? 'I’ll make that focused change now.' : 'I’m doing that now.' };
+}
+
+export function isFastEditObjective(text: string, selectedFiles: string[] = []) {
+  if (selectedFiles.length > 1 || text.length > 500) return false;
+  const action = /\b(change|replace|rename|set|update|make|fix|adjust)\b/i.test(text);
+  const unsafe = /\b(create|add (?:a )?(?:new )?file|delete|remove (?:the )?file|move|copy|install|dependency|package|command|script|generate|image|video|animation|audio|music|multiple|across|refactor|redesign|feature)\b/i.test(text);
+  return action && !unsafe;
+}
+
+function explicitlyRequestsPlan(text: string) { return /\b(plan|planning|plan-first|implementation plan|design document)\b/i.test(text); }
+function defaultManagementMessage(action: AssistantManagementDecision['action']) {
+  if (action === 'clarify') return 'I need a little more detail before I change anything.';
+  if (action === 'ignore') return 'No workspace action is needed.';
+  if (action === 'status') return 'I checked the current work.';
+  return 'I handled that request.';
 }
 export function isStandaloneMediaObjective(objective: string) {
   const text = objective.normalize('NFKC').toLocaleLowerCase();

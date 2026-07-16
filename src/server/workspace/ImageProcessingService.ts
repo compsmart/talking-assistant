@@ -8,6 +8,7 @@ const INPUT_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const MAX_PIXELS = 25_000_000;
 
 interface Color { red: number; green: number; blue: number }
+interface DetectedRegion { labels: number[]; area: number; left: number; top: number; right: number; bottom: number }
 
 export class ImageProcessingService {
   constructor(private readonly registry: WorkspaceRegistry) {}
@@ -47,13 +48,16 @@ export class ImageProcessingService {
     const padding = boundedInteger(args?.padding, 0, 512, 2);
     const connectivity = Number(args?.connectivity) === 4 ? 4 : 8;
     const maxRegions = boundedInteger(args?.maxRegions, 1, 200, 100);
-    const { data, info } = await sharp(source).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+    const image = sharp(source); const metadata = await image.metadata();
+    const { data, info } = await image.ensureAlpha().raw().toBuffer({ resolveWithObject: true });
     assertSize(info.width, info.height);
     const target = args?.backgroundColor ? parseColor(args.backgroundColor) : sampleCorners(data, info.width, info.height);
+    const usesAlpha = metadata.hasAlpha === true && hasMeaningfulAlpha(data);
+    const mergeGap = boundedInteger(args?.mergeGap, 0, 512, Math.max(1, Math.round(Math.min(info.width, info.height) * .02)));
     const labels = new Int32Array(info.width * info.height);
     const queue = new Int32Array(info.width * info.height);
-    const regions: Array<{ label: number; area: number; left: number; top: number; right: number; bottom: number }> = [];
-    const isForeground = (index: number) => data[index * 4 + 3] > 8 && colorDistanceAt(data, index * 4, target) > tolerance;
+    const components: DetectedRegion[] = [];
+    const isForeground = (index: number) => data[index * 4 + 3] > 8 && (usesAlpha || colorDistanceAt(data, index * 4, target) > tolerance);
     let label = 0;
 
     for (let pixel = 0; pixel < labels.length; pixel++) {
@@ -67,10 +71,10 @@ export class ImageProcessingService {
           if (!labels[neighbor] && isForeground(neighbor)) { labels[neighbor] = label; queue[tail++] = neighbor; }
         }
       }
-      if (area >= minArea) regions.push({ label, area, left, top, right, bottom });
+      if (area >= minArea) components.push({ labels: [label], area, left, top, right, bottom });
     }
 
-    regions.sort((a, b) => a.top - b.top || a.left - b.left);
+    const regions = readingOrder(mergeNearbyRegions(components, mergeGap));
     const selected = regions.slice(0, maxRegions); const output = [];
     const prefix = slug(String(args?.outputPrefix || basename(sourcePath, extname(sourcePath))));
     for (let index = 0; index < selected.length; index++) {
@@ -78,8 +82,9 @@ export class ImageProcessingService {
       const left = Math.max(0, region.left - padding); const top = Math.max(0, region.top - padding);
       const right = Math.min(info.width - 1, region.right + padding); const bottom = Math.min(info.height - 1, region.bottom + padding);
       const width = right - left + 1; const height = bottom - top + 1; const pixels = Buffer.alloc(width * height * 4);
+      const regionLabels = new Set(region.labels);
       for (let y = top; y <= bottom; y++) for (let x = left; x <= right; x++) {
-        const sourcePixel = y * info.width + x; if (labels[sourcePixel] !== region.label) continue;
+        const sourcePixel = y * info.width + x; if (!regionLabels.has(labels[sourcePixel])) continue;
         const sourceOffset = sourcePixel * 4; const targetOffset = ((y - top) * width + x - left) * 4;
         data.copy(pixels, targetOffset, sourceOffset, sourceOffset + 4);
       }
@@ -87,7 +92,7 @@ export class ImageProcessingService {
       await sharp(pixels, { raw: { width, height, channels: 4 } }).webp({ lossless: true }).toFile(destination.absolute);
       output.push({ path: destination.relative, bounds: { x: left, y: top, width, height }, pixelArea: region.area });
     }
-    return { ok: true, sourcePath, backgroundColor: colorHex(target), tolerance, regions: output, detectedRegions: regions.length, truncated: regions.length > selected.length };
+    return { ok: true, sourcePath, backgroundColor: colorHex(target), tolerance, usedExistingAlpha: usesAlpha, mergeGap, regions: output, detectedComponents: components.length, detectedRegions: regions.length, truncated: regions.length > selected.length };
   }
 
   private async source(path: string, root: string) {
@@ -119,6 +124,36 @@ function sampleCorners(data: Buffer, width: number, height: number): Color {
 function totalDistance(color: Color, values: Color[]) { return values.reduce((sum, value) => sum + Math.max(Math.abs(color.red - value.red), Math.abs(color.green - value.green), Math.abs(color.blue - value.blue)), 0); }
 function colorDistanceAt(data: Buffer, offset: number, target: Color) { return Math.max(Math.abs(data[offset] - target.red), Math.abs(data[offset + 1] - target.green), Math.abs(data[offset + 2] - target.blue)); }
 function colorHex(color: Color) { return `#${[color.red, color.green, color.blue].map((value) => value.toString(16).padStart(2, '0')).join('')}`; }
+function hasMeaningfulAlpha(data: Buffer) { for (let offset = 3; offset < data.length; offset += 4) if (data[offset] < 250) return true; return false; }
+function mergeNearbyRegions(regions: DetectedRegion[], gap: number) {
+  let pending = regions.map((region) => ({ ...region, labels: [...region.labels] })); let changed = true;
+  while (changed) {
+    changed = false; const merged: DetectedRegion[] = [];
+    for (const region of pending) {
+      const target = merged.find((candidate) => regionsNear(region, candidate, gap));
+      if (!target) { merged.push(region); continue; }
+      target.labels.push(...region.labels); target.area += region.area;
+      target.left = Math.min(target.left, region.left); target.top = Math.min(target.top, region.top);
+      target.right = Math.max(target.right, region.right); target.bottom = Math.max(target.bottom, region.bottom); changed = true;
+    }
+    pending = merged;
+  }
+  return pending;
+}
+function regionsNear(a: DetectedRegion, b: DetectedRegion, gap: number) {
+  return a.left - gap < b.right + 1 && b.left < a.right + 1 + gap && a.top - gap < b.bottom + 1 && b.top < a.bottom + 1 + gap;
+}
+function readingOrder(regions: DetectedRegion[]) {
+  const pending = [...regions].sort((a, b) => (a.top + a.bottom) / 2 - (b.top + b.bottom) / 2); const rows: DetectedRegion[][] = [];
+  for (const region of pending) {
+    const row = rows.find((items) => {
+      const top = Math.min(...items.map((item) => item.top)); const bottom = Math.max(...items.map((item) => item.bottom)); const center = (region.top + region.bottom) / 2;
+      return center >= top && center <= bottom;
+    });
+    if (row) row.push(region); else rows.push([region]);
+  }
+  return rows.flatMap((row) => row.sort((a, b) => a.left - b.left));
+}
 function removeMatchingPixels(data: Buffer, target: Color, tolerance: number) { let removed = 0; for (let offset = 0; offset < data.length; offset += 4) if (data[offset + 3] && colorDistanceAt(data, offset, target) <= tolerance) { data[offset + 3] = 0; removed++; } return removed; }
 function removeEdgeConnectedPixels(data: Buffer, width: number, height: number, target: Color, tolerance: number) {
   const seen = new Uint8Array(width * height); const queue = new Int32Array(width * height); let head = 0; let tail = 0; let removed = 0;

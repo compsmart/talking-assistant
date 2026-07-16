@@ -11,6 +11,9 @@ import { encodeAnimation, extractFourSecondFrames, mapVideoFrameToReference, nor
 
 export const MEDIA_AGENT_SYSTEM = `You are the dedicated Media Agent. Reason about composition, identity, motion, alpha, timing, and audio before generating. Use explicit first and last frames for endpoint-controlled animation. Inspect generated outputs and prefer deterministic reprocessing over additional paid generation when geometry, alpha, timing, or encoding can be corrected locally.`;
 
+const TRANSPARENT_IMAGE_STAGE_PROMPT = `Render the requested subject isolated on a pure, perfectly flat #00FF00 chroma-key green background. The green must extend to every image edge and corner. Do not add scenery, a floor, a horizon, shadows, reflections, gradients, texture, glow, or green spill. Keep all requested subject colors unchanged, including white and near-white details.`;
+const TRANSPARENT_IMAGE_MATTE: AnimationMatteSettings = { backgroundColor: '#00ff00', tolerance: 3, feather: 1, despill: 1, edgeConnected: false };
+
 export interface MediaAgentProgress { stage: MediaStageName; progress: number; message: string }
 export interface AnimationAgentResult { output: string; audio?: string; artifacts: Array<{ stage: MediaStageName; path: string; label: string; mimeType: string; type: 'image' | 'video' | 'audio' | 'contact-sheet' | 'mask' | 'animation' }> }
 
@@ -26,11 +29,24 @@ export class MediaAgent {
   }
 
   private async generateImage(context: WorkspaceContext, request: ImageMediaJobRequest, jobDir: string, cancelled: () => boolean, progress: (event: MediaAgentProgress) => Promise<void>): Promise<AnimationAgentResult> {
-    const client = this.requireClient(); await progress({ stage: 'generate', progress: 20, message: `Generating image with ${config.imageModel}` }); const parts: any[] = [{ text: request.prompt }];
+    const client = this.requireClient(); await progress({ stage: 'generate', progress: 20, message: `Generating image with ${config.imageModel}` }); const parts: any[] = [{ text: `${request.prompt.trim()}${request.transparent ? `\n\n${TRANSPARENT_IMAGE_STAGE_PROMPT}` : ''}` }];
     for (const path of request.referenceImages || []) { const absolute = await safeWorkspacePath(context.draftDir, path, true); parts.push({ inlineData: { data: (await readFile(absolute)).toString('base64'), mimeType: mimeFor(path) } }); }
     const response: any = await (client as any).models.generateContent({ model: config.imageModel, contents: [{ role: 'user', parts }], config: { responseModalities: ['IMAGE'], imageConfig: { aspectRatio: request.aspectRatio || '1:1', imageSize: '1K' } } }); this.check(cancelled);
     const part = response.parts?.find((item: any) => item.inlineData?.data) || response.candidates?.flatMap((item: any) => item.content?.parts || []).find((item: any) => item.inlineData?.data); if (!part) throw new Error('The image model returned no image.');
-    const outputDir = join(jobDir, 'outputs', 'v1'); await mkdir(outputDir, { recursive: true }); const output = join(outputDir, 'image.webp'); await sharp(Buffer.from(part.inlineData.data, 'base64')).webp({ quality: 90 }).toFile(output); await progress({ stage: 'encode', progress: 95, message: 'Image is ready to publish' });
+    const sourceDir = join(jobDir, 'source'); const outputDir = join(jobDir, 'outputs', 'v1'); await Promise.all([mkdir(sourceDir, { recursive: true }), mkdir(outputDir, { recursive: true })]);
+    const generated = Buffer.from(part.inlineData.data, 'base64'); const output = join(outputDir, 'image.webp');
+    if (request.transparent) {
+      const greenStage = join(sourceDir, 'image-green-stage.png'); await sharp(generated).png().toFile(greenStage); this.check(cancelled);
+      await progress({ stage: 'matte', progress: 78, message: 'Removing all pixels matching the green stage while preserving other subject colors' });
+      const transparent = join(outputDir, 'image-transparent.png'); await removeEdgeConnectedBackground(greenStage, transparent, TRANSPARENT_IMAGE_MATTE); this.check(cancelled);
+      await sharp(transparent).webp({ lossless: true }).toFile(output);
+      await progress({ stage: 'encode', progress: 95, message: 'Transparent image is ready to publish' });
+      return { output, artifacts: [
+        { stage: 'generate', path: greenStage, label: 'Generated green stage', mimeType: 'image/png', type: 'image' },
+        { stage: 'encode', path: output, label: 'Transparent image', mimeType: 'image/webp', type: 'image' },
+      ] };
+    }
+    await sharp(generated).webp({ quality: 90 }).toFile(output); await progress({ stage: 'encode', progress: 95, message: 'Image is ready to publish' });
     return { output, artifacts: [{ stage: 'encode', path: output, label: 'Generated image', mimeType: 'image/webp', type: 'image' }] };
   }
 

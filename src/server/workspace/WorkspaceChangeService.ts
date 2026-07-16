@@ -9,6 +9,9 @@ import type { ActivityHub } from '../activity.js';
 
 export class WorkspaceChangeService {
   private readonly editRequests = new Map<string, { signature: string; promise: Promise<unknown> }>();
+  private readonly pendingDeletionPublications = new Map<string, string[]>();
+  private deletionPublishTimer?: NodeJS.Timeout;
+  private deletionPublishRunning = false;
   constructor(private readonly workspace: WorkspaceManager, private readonly tools: WorkspaceTools, private readonly files: WorkspaceFiles, private readonly lock: WorkspaceMutationLock, private readonly settings: WorkspaceSettingsService, private readonly activity?: ActivityHub) {}
 
   async edit(edits: WorkspaceEdit[], owner = 'a direct file edit', operationId?: string) {
@@ -25,8 +28,78 @@ export class WorkspaceChangeService {
     return promise;
   }
 
+  async assistantEdit<T>(operationId: string, objective: string, change: (taskId: string) => Promise<T>) {
+    return this.transaction(`Assistant fast edit: ${objective.slice(0, 120)}`, change, { skipValidation: true, source: 'direct-edit', operationId });
+  }
+
   async remove(paths: string[]) {
-    return this.transaction('a direct file deletion', () => this.files.remove(paths), { previewOnly: true });
+    const taskId = `manual-${randomUUID()}`;
+    this.activity?.register({
+      id: taskId,
+      workspaceId: this.workspace.workspaceId,
+      source: 'workspace',
+      title: 'a direct file deletion',
+      message: 'Deleting workspace files.',
+      paths,
+      publicationPending: true,
+    });
+    try {
+      return await this.lock.run('a direct file deletion', async () => {
+        const value = await this.files.remove(paths);
+        this.pendingDeletionPublications.set(taskId, value);
+        await this.activity?.emit(taskId, 'status', 'mutation', `Deleted ${value.length} file(s). Preview publication is queued.`, { paths: value, publicationPending: true });
+        this.scheduleDeletionPublication();
+        return {
+          value,
+          changedFiles: value.map((path) => ({ path, action: 'deleted' as const })),
+          checks: [{ name: 'preview publication', status: 'skipped' as const, details: 'Queued in the background so the file operation can return immediately.' }],
+          publicationId: taskId,
+          publicationPending: true as const,
+        };
+      });
+    } catch (error) {
+      await this.activity?.emit(taskId, 'error', 'failed', (error as Error).message);
+      this.activity?.finish(taskId, 'failed', (error as Error).message, { severity: 'error', paths, publicationPending: false });
+      throw error;
+    }
+  }
+
+  private scheduleDeletionPublication() {
+    if (this.deletionPublishTimer || this.deletionPublishRunning) return;
+    this.deletionPublishTimer = setTimeout(() => {
+      this.deletionPublishTimer = undefined;
+      void this.publishPendingDeletions();
+    }, 200);
+    this.deletionPublishTimer.unref?.();
+  }
+
+  private async publishPendingDeletions() {
+    if (this.deletionPublishRunning || !this.pendingDeletionPublications.size) return;
+    this.deletionPublishRunning = true;
+    const batch = [...this.pendingDeletionPublications.entries()];
+    this.pendingDeletionPublications.clear();
+    const [publicationId] = batch[0];
+    const paths = [...new Set(batch.flatMap(([, changedPaths]) => changedPaths))];
+    try {
+      for (const [taskId] of batch) await this.activity?.emit(taskId, 'status', 'publishing', `Publishing ${paths.length} deleted file(s) in one preview build.`, { paths });
+      const published = await this.lock.enqueue('background deletion preview publication', () => {
+        const mode = this.settings.get().mode;
+        return this.workspace.publish(publicationId, { mode, browserGuard: true });
+      });
+      for (const [taskId, taskPaths] of batch) {
+        await this.activity?.emit(taskId, 'complete', 'published', 'The updated preview is healthy and live.', { previewVersion: published.version, paths: taskPaths });
+        this.activity?.finish(taskId, 'succeeded', `Deleted ${taskPaths.length} file(s) and published the updated preview.`, { paths: taskPaths, previewVersion: published.version, publicationPending: false });
+      }
+    } catch (error) {
+      const message = `The files were deleted, but the replacement preview could not be published: ${(error as Error).message}. The previous immutable preview remains live and available for rollback.`;
+      for (const [taskId, taskPaths] of batch) {
+        await this.activity?.emit(taskId, 'error', 'publishing', message, { paths: taskPaths });
+        this.activity?.finish(taskId, 'failed', message, { severity: 'error', paths: taskPaths, publicationPending: false });
+      }
+    } finally {
+      this.deletionPublishRunning = false;
+      if (this.pendingDeletionPublications.size) this.scheduleDeletionPublication();
+    }
   }
 
   async createFile(directory: string, name: string) {
@@ -41,13 +114,13 @@ export class WorkspaceChangeService {
     return this.transaction('a direct file copy', () => this.files.copyFile(sourcePath, destinationDirectory), { previewOnly: true, paths: [sourcePath, destinationDirectory] });
   }
 
-  async transaction<T>(owner: string, change: () => Promise<T>, options: { previewOnly?: boolean; skipValidation?: boolean; source?: 'direct-edit' | 'workspace'; paths?: string[]; operationId?: string } = {}) {
+  async transaction<T>(owner: string, change: (taskId: string) => Promise<T>, options: { previewOnly?: boolean; skipValidation?: boolean; source?: 'direct-edit' | 'workspace'; paths?: string[]; operationId?: string } = {}) {
     const taskId = `manual-${randomUUID()}`;
     this.activity?.register({ id: taskId, operationId: options.operationId, workspaceId: this.workspace.workspaceId, source: options.source || 'workspace', title: owner, message: `Started ${owner}`, paths: options.paths });
     try { return await this.lock.run(owner, async () => {
       const before = await this.tools.manifest();
       try {
-        const value = await change(); const after = await this.tools.manifest(); const changedFiles = this.tools.changed(before, after);
+        const value = await change(taskId); const after = await this.tools.manifest(); const changedFiles = this.tools.changed(before, after);
         const settings = this.settings.get(); const mode = settings.mode;
         const checks = options.skipValidation
           ? [{ name: 'independent validation', status: 'skipped' as const, details: 'Direct file edits do not run the coding-agent test pipeline.' }]

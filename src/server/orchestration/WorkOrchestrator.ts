@@ -19,6 +19,7 @@ export class WorkOrchestrator {
   private draining = false;
   private sockets = new Set<{ socket: WebSocket; workspaceId: string }>();
   private continuedSegments = new Set<string>();
+  private deferredUntil = new Map<string, number>();
 
   constructor(
     private readonly store: WorkStore, private readonly tasks: TaskManager, private readonly plans: PlanManager,
@@ -55,12 +56,13 @@ export class WorkOrchestrator {
       const request = { ...item.request, objective, successCriteria: [...(mode === 'replace' ? [] : item.request.successCriteria || []), ...criteria] };
       return { ...item, request, specRevision: item.specRevision + 1, fingerprint: fingerprintFor(item.workspaceId, item.strategy, request), status: 'queued', startedAt: undefined, completedAt: undefined, result: undefined, subtasks: [], attempts: item.attempts.map((attempt) => ['queued', 'running', 'paused', 'cancelling'].includes(attempt.status) ? { ...attempt, status: 'superseded', completedAt: new Date().toISOString(), updatedAt: new Date().toISOString() } : attempt) };
     });
-    this.active.delete(id); this.notice(work, 'updated', 'I updated the running task with the new direction.'); void this.drain();
+    this.active.delete(id); this.deferredUntil.delete(id); this.notice(work, 'updated', 'I updated the running task with the new direction.'); void this.drain();
     return { disposition: 'updated', work, message: 'Work updated.' };
   }
 
   cancel(id: string): WorkCommandResult {
     const current = this.required(id); if (isTerminal(current)) throw statusError('That work has already finished.', 409);
+    this.deferredUntil.delete(id);
     const active = this.active.get(id); if (active) this.cancelLegacy(active);
     const work = this.store.update(id, (item) => ({ ...item, status: active ? 'cancelling' : 'cancelled', completedAt: active ? undefined : new Date().toISOString(), result: active ? undefined : { status: 'cancelled', summary: 'Work cancelled before it started.', changedFiles: [], checks: [] } }));
     if (!active) this.notice(work, 'cancelled', 'I cancelled that task.');
@@ -79,7 +81,7 @@ export class WorkOrchestrator {
   answer(id: string, questionId: string, answer: string): WorkCommandResult {
     const active = this.active.get(id); const proceed = !/^(no|stop|cancel|false)$/i.test(answer.trim());
     const work = this.store.update(id, (item) => ({ ...item, status: active?.kind === 'planning' ? 'planning' : 'queued', request: questionId.startsWith('agent-selection:') ? { ...item.request, preferredAgentId: answer.trim() } : item.request, questions: item.questions.map((question) => question.id === questionId ? { ...question, answer: answer.trim(), answeredAt: new Date().toISOString() } : question) }));
-    if (active?.kind === 'planning') this.plans.continue(active.runId, proceed); else void this.drain(); return { disposition: 'answered', work, message: 'Answer recorded.' };
+    this.deferredUntil.delete(id); if (active?.kind === 'planning') this.plans.continue(active.runId, proceed); else void this.drain(); return { disposition: 'answered', work, message: 'Answer recorded.' };
   }
 
   attach(socket: WebSocket, workspaceId: string) {
@@ -94,7 +96,7 @@ export class WorkOrchestrator {
     if (this.draining) return; this.draining = true;
     try {
       while (this.active.size < this.settings.get().codingAgent.maxParallelAgents) {
-        const work = this.store.list(this.registry.active().id, false).find((item) => item.status === 'queued' && (!isPlanningWork(item) || !this.plans.getActive())); if (!work) break;
+        const time = Date.now(); const work = this.store.list(this.registry.active().id, false).find((item) => item.status === 'queued' && (this.deferredUntil.get(item.id) || 0) <= time && (!isPlanningWork(item) || !this.plans.getActive())); if (!work) break;
         await this.launch(work).catch((error) => this.fail(work.id, (error as Error).message));
       }
     } finally { this.draining = false; }
@@ -102,7 +104,9 @@ export class WorkOrchestrator {
 
   private async launch(work: WorkItemSnapshot) {
     this.store.update(work.id, (item) => ({ ...item, status: 'coordinating' }));
-    const decision = await this.assistant.coordinate(work, this.store.list(work.workspaceId, false));
+    const decision = work.dispatch
+      ? { action: work.dispatch.kind, writeScope: work.dispatch.kind === 'code' ? ['**/*'] : work.dispatch.kind === 'media' ? ['assets/generated/**', 'assets/processed/**'] : [], reason: work.dispatch.reason } as const
+      : await this.assistant.coordinate(work, this.store.list(work.workspaceId, false));
     if (decision.action === 'duplicate' && decision.duplicateOf) {
       const duplicate = this.store.update(work.id, (item) => ({ ...item, status: 'superseded', duplicateOf: decision.duplicateOf, completedAt: new Date().toISOString() }));
       this.notice(duplicate, 'duplicate', `I already have that in progress as task ${decision.duplicateOf}.`); return;
@@ -112,6 +116,10 @@ export class WorkOrchestrator {
     const executionRole = planning ? 'planner' : decision.action === 'media' ? 'media' : work.attempts.some((attempt) => attempt.status === 'failed' && ['coder', 'resolver'].includes(attempt.role)) ? 'resolver' : 'coder';
     const selection = await this.assistant.selectAgent(work, executionRole, this.store.list(work.workspaceId));
     if (selection.status !== 'selected') {
+      if (selection.status === 'no_eligible' && /concurrency limit/i.test(selection.reason)) {
+        this.store.update(work.id, (item) => ({ ...item, status: 'queued' })); this.deferredUntil.set(work.id, Date.now() + 1_000);
+        setTimeout(() => void this.drain(), 1_050).unref?.(); return;
+      }
       const questionId = `agent-selection:${work.specRevision}`;
       const prompt = selection.status === 'tie' ? `${selection.reason} Choose the agent for this task.` : `${selection.reason} Update the agent configuration, then choose an eligible agent.`;
       const waiting = this.store.update(work.id, (item) => ({ ...item, status: 'needs_input', questions: item.questions.some((question) => question.id === questionId) ? item.questions : [...item.questions, { id: questionId, prompt, ...(selection.candidates.length ? { options: selection.candidates.map((candidate) => candidate.id) } : {}), askedAt: new Date().toISOString() }] }));

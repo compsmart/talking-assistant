@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { AvatarController } from '../avatar/AvatarController';
 import { FloatingWindow } from './FloatingWindow';
+import type { LiveActivity } from '../live/LiveClient';
 
-interface Props { caption: string; captionFading?: boolean; canvasControls?: ReactNode; toolbar: ReactNode; headerActions?: ReactNode; onReady: (controller: AvatarController) => void; onError: (message: string) => void }
+interface Props { caption: string; captionFading?: boolean; activity?: LiveActivity; canvasControls?: ReactNode; toolbar: ReactNode; headerActions?: ReactNode; onReady: (controller: AvatarController) => void; onError: (message: string) => void }
 
-export function AvatarPanel({ caption, captionFading = false, canvasControls, toolbar, headerActions, onReady, onError }: Props) {
+export function AvatarPanel({ caption, captionFading = false, activity, canvasControls, toolbar, headerActions, onReady, onError }: Props) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const controller = useRef<AvatarController | null>(null);
   const [error, setError] = useState('');
@@ -25,6 +26,7 @@ export function AvatarPanel({ caption, captionFading = false, canvasControls, to
         const rect = event.currentTarget.getBoundingClientRect(); controller.current?.setPointer(((event.clientX - rect.left) / rect.width) * 2 - 1, ((event.clientY - rect.top) / rect.height) * 2 - 1);
       }} />}
       {canvasControls && <div className="avatar-canvas-controls">{canvasControls}</div>}
+      {activity && <div className={`live-activity ${activity.kind}`} role="status" aria-live="polite"><span className="spinner" /><span>{activity.label}</span></div>}
       {caption && <div className={`avatar-caption${captionFading ? ' fading' : ''}`}>{caption}</div>}
     </FloatingWindow>
   );

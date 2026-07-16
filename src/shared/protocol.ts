@@ -36,6 +36,8 @@ export interface ActivityRecord {
   requestId?: string;
   httpStatus?: number;
   paths?: string[];
+  previewVersion?: string;
+  publicationPending?: boolean;
   resolvedAt?: string;
   resolution?: string;
   legacy?: boolean;
@@ -114,6 +116,9 @@ export interface DomSelection {
   kind: 'dom';
   identifier: string;
   selector: string;
+  xpath?: string;
+  domPath?: Array<{ tagName: string; childIndex: number }>;
+  locatorStrategy?: 'data-cowork-id' | 'id' | 'data-testid' | 'dom-path';
   tagName: string;
   text: string;
   attributes: Record<string, string>;
@@ -447,6 +452,7 @@ export type AgentRunSnapshot = TaskSnapshot | PlanningRunSnapshot;
 export type AgentRunResult = TaskResult | PlanResult;
 
 export type WorkStrategy = 'auto' | 'direct' | 'plan_first' | 'plan_only';
+export type WorkDispatchKind = 'code' | 'media' | 'plan';
 export type WorkStatus =
   | 'queued' | 'coordinating' | 'planning' | 'awaiting_approval' | 'running'
   | 'integrating' | 'validating' | 'publishing' | 'needs_input' | 'cancelling'
@@ -638,6 +644,30 @@ export interface WorkRequest extends TaskRequest {
   strategy?: WorkStrategy;
   dedupeMode?: 'auto' | 'force';
   clientRequestId?: string;
+  dispatch?: { kind: WorkDispatchKind; reason: string };
+}
+
+export interface AssistantIntakeRequest {
+  turnId: string;
+  userText: string;
+  liveNote?: string;
+  selectedElement?: WorkspaceSelection;
+  selectedFiles?: string[];
+  referenceGrantId?: string;
+  workspaceVersion?: string;
+}
+
+export type AssistantIntakeDisposition =
+  | 'created' | 'reused' | 'updated' | 'cancelled' | 'answered' | 'approved'
+  | 'reported' | 'ignored' | 'rejected' | 'needs_clarification' | 'fast_edit';
+
+export interface AssistantIntakeResult {
+  disposition: AssistantIntakeDisposition;
+  message: string;
+  work?: WorkItemSnapshot;
+  workIds?: string[];
+  changedFiles?: FileReference[];
+  previewVersion?: string;
 }
 
 export interface WorkQuestion {
@@ -713,6 +743,7 @@ export interface WorkItemSnapshot {
   attempts: WorkerAttemptSnapshot[];
   questions: WorkQuestion[];
   result?: WorkResult;
+  dispatch?: { kind: WorkDispatchKind; reason: string };
   duplicateOf?: string;
   supersededBy?: string;
 }
