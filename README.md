@@ -2,6 +2,8 @@
 
 A full-screen cowork workspace with a movable talking wireframe head, Gemini Live voice and vision, photo-based face skinning, and durable concurrent planning/coding orchestration.
 
+![Minimal Gemini Cowork interface showing the live assistant, workspace preview, and chat controls](./screenshot.png)
+
 ## Requirements
 
 - Node.js 24 or newer
