@@ -12,9 +12,9 @@ interface Color { red: number; green: number; blue: number }
 export class ImageProcessingService {
   constructor(private readonly registry: WorkspaceRegistry) {}
 
-  async removeBackground(args: any) {
+  async removeBackground(args: any, root = this.registry.active().draftDir) {
     const sourcePath = String(args?.sourcePath || '');
-    const source = await this.source(sourcePath);
+    const source = await this.source(sourcePath, root);
     const mode = args?.mode === 'color' ? 'color' : 'edge';
     const tolerance = boundedInteger(args?.tolerance, 0, 255, 28);
     const padding = boundedInteger(args?.padding, 0, 512, 0);
@@ -30,7 +30,7 @@ export class ImageProcessingService {
     const crop = args?.crop !== false;
     const bounds = crop ? alphaBounds(data, info.width, info.height, padding) : { left: 0, top: 0, width: info.width, height: info.height };
     if (!bounds) throw new Error('Background removal made the entire image transparent.');
-    const destination = await this.destination('backgrounds', args?.name || basename(sourcePath, extname(sourcePath)));
+    const destination = await this.destination('backgrounds', args?.name || basename(sourcePath, extname(sourcePath)), root);
     await sharp(data, { raw: { width: info.width, height: info.height, channels: 4 } })
       .extract(bounds).webp({ lossless: true }).toFile(destination.absolute);
     return {
@@ -39,9 +39,9 @@ export class ImageProcessingService {
     };
   }
 
-  async extractRegions(args: any) {
+  async extractRegions(args: any, root = this.registry.active().draftDir) {
     const sourcePath = String(args?.sourcePath || '');
-    const source = await this.source(sourcePath);
+    const source = await this.source(sourcePath, root);
     const tolerance = boundedInteger(args?.tolerance, 0, 255, 28);
     const minArea = boundedInteger(args?.minArea, 1, MAX_PIXELS, 64);
     const padding = boundedInteger(args?.padding, 0, 512, 2);
@@ -83,21 +83,21 @@ export class ImageProcessingService {
         const sourceOffset = sourcePixel * 4; const targetOffset = ((y - top) * width + x - left) * 4;
         data.copy(pixels, targetOffset, sourceOffset, sourceOffset + 4);
       }
-      const destination = await this.destination('regions', `${prefix}-${String(index + 1).padStart(2, '0')}`);
+      const destination = await this.destination('regions', `${prefix}-${String(index + 1).padStart(2, '0')}`, root);
       await sharp(pixels, { raw: { width, height, channels: 4 } }).webp({ lossless: true }).toFile(destination.absolute);
       output.push({ path: destination.relative, bounds: { x: left, y: top, width, height }, pixelArea: region.area });
     }
     return { ok: true, sourcePath, backgroundColor: colorHex(target), tolerance, regions: output, detectedRegions: regions.length, truncated: regions.length > selected.length };
   }
 
-  private async source(path: string) {
+  private async source(path: string, root: string) {
     if (!path) throw new Error('A workspace-relative sourcePath is required.');
     if (!INPUT_MIME_TYPES.has(mimeFor(path))) throw new Error('Image processing supports PNG, JPEG, and WebP source files.');
-    return safeWorkspacePath(this.registry.active().draftDir, path, true);
+    return safeWorkspacePath(root, path, true);
   }
 
-  private async destination(kind: 'backgrounds' | 'regions', requested: unknown) {
-    const root = this.registry.active().draftDir; const directory = join(root, 'assets', 'processed', kind); await mkdir(directory, { recursive: true });
+  private async destination(kind: 'backgrounds' | 'regions', requested: unknown, root: string) {
+    const directory = join(root, 'assets', 'processed', kind); await mkdir(directory, { recursive: true });
     const stem = slug(String(requested || kind)); let name = `${stem}.webp`; let index = 2;
     while (await stat(join(directory, name)).then(() => true).catch(() => false)) name = `${stem}-${index++}.webp`;
     const absolute = join(directory, name); return { absolute, relative: relative(root, absolute).replaceAll('\\', '/') };

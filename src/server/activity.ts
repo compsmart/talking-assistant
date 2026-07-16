@@ -14,6 +14,7 @@ export class ActivityHub {
   private history = new Map<string, ActivityEvent[]>();
   private sockets = new Map<string, Set<WebSocket>>();
   private feedSockets = new Set<WebSocket>();
+  private eventListeners = new Set<(event: ActivityEvent) => void>();
   private snapshots = new Map<string, ActivitySnapshot>();
   private records = new Map<string, ActivityRecord>();
   private pendingWrites = new Map<string, string[]>();
@@ -31,6 +32,7 @@ export class ActivityHub {
   async emit(taskId: string, kind: ActivityKind, phase: string, message: string, data?: unknown) {
     const event: ActivityEvent = { taskId, seq: (this.sequences.get(taskId) || 0) + 1, at: new Date().toISOString(), kind, phase, message, data };
     this.sequences.set(taskId, event.seq);
+    for (const listener of this.eventListeners) listener(event);
     const events = this.history.get(taskId) || []; events.push(event); this.history.set(taskId, events);
     this.broadcast(taskId, { type: 'event', event });
     const pending = this.pendingWrites.get(taskId) || []; pending.push(`${JSON.stringify(event)}\n`); this.pendingWrites.set(taskId, pending);
@@ -136,6 +138,7 @@ export class ActivityHub {
     socket.on('close', () => set.delete(socket));
   }
   attachFeed(socket: WebSocket) { this.feedSockets.add(socket); socket.on('close', () => this.feedSockets.delete(socket)); }
+  subscribeEvents(listener: (event: ActivityEvent) => void) { this.eventListeners.add(listener); return () => this.eventListeners.delete(listener); }
 
   private broadcast(taskId: string, payload: unknown) { const message = JSON.stringify(payload); for (const socket of this.sockets.get(taskId) || []) if (socket.readyState === socket.OPEN) socket.send(message); }
   private broadcastFeed(payload: unknown) { const message = JSON.stringify(payload); for (const socket of this.feedSockets) if (socket.readyState === socket.OPEN) socket.send(message); }

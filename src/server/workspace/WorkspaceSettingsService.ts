@@ -7,7 +7,7 @@ export const DEFAULT_WORKSPACE_SETTINGS: WorkspaceSettings = {
   mode: 'mixed',
   vision: { frameRate: 1, quality: 'balanced' },
   liveAgent: { directFileEdits: true },
-  codingAgent: { dependencies: 'allow', mediaGeneration: true, validation: 'standard', reasoningProfile: 'adaptive' },
+  codingAgent: { dependencies: 'allow', mediaGeneration: true, validation: 'standard', reasoningProfile: 'adaptive', maxParallelAgents: 3 },
   git: { commitOnFileManagerClose: 'ask' },
 };
 
@@ -50,13 +50,15 @@ export function validateWorkspaceSettings(input: any): WorkspaceSettings {
   const dependencies = oneOf<WorkspaceSettings['codingAgent']['dependencies']>(input.codingAgent?.dependencies, ['allow', 'existing-only'], 'dependency policy');
   const validation = oneOf<WorkspaceSettings['codingAgent']['validation']>(input.codingAgent?.validation, ['standard', 'fast', 'unchecked'], 'validation profile');
   const reasoningProfile = oneOf<WorkspaceSettings['codingAgent']['reasoningProfile']>(input.codingAgent?.reasoningProfile ?? 'adaptive', ['adaptive', 'balanced', 'fast'], 'reasoning profile');
+  const maxParallelAgents = Number(input.codingAgent?.maxParallelAgents ?? 3);
+  if (!Number.isInteger(maxParallelAgents) || maxParallelAgents < 1 || maxParallelAgents > 8) throw invalid('Parallel agent capacity must be an integer from 1 to 8.');
   const commit = oneOf<WorkspaceSettings['git']['commitOnFileManagerClose']>(input.git?.commitOnFileManagerClose, ['ask', 'always', 'never'], 'commit behavior');
   if (typeof input.liveAgent?.directFileEdits !== 'boolean') throw invalid('Live direct-edit access must be a boolean.');
   if (typeof input.codingAgent?.mediaGeneration !== 'boolean') throw invalid('Media-generation access must be a boolean.');
   return {
     mode, vision: { frameRate, quality },
     liveAgent: { directFileEdits: input.liveAgent.directFileEdits },
-    codingAgent: { dependencies, mediaGeneration: input.codingAgent.mediaGeneration, validation, reasoningProfile },
+    codingAgent: { dependencies, mediaGeneration: input.codingAgent.mediaGeneration, validation, reasoningProfile, maxParallelAgents },
     git: { commitOnFileManagerClose: commit },
   };
 }

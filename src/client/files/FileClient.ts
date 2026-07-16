@@ -1,4 +1,4 @@
-import type { AssetRecord, CanvasImageGenerationRequest, CanvasImageGenerationResult, WorkspaceEdit, WorkspaceFileDocument, WorkspaceFileNode } from '../../shared/protocol';
+import type { AssetRecord, ImageAssetGenerationRequest, ImageAssetGenerationResult, WorkspaceEdit, WorkspaceFileDocument, WorkspaceFileNode } from '../../shared/protocol';
 
 async function json<T>(response: Response): Promise<T> {
   const body = await response.json().catch(() => ({}));
@@ -21,8 +21,8 @@ export function renameFile(path: string, newName: string) { return fetch('/api/w
 export function copyFile(sourcePath: string, destinationDirectory: string) { return fetch('/api/workspace/files/copy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sourcePath, destinationDirectory }) }).then((response) => json<WorkspaceFileMutationResult>(response)); }
 export function deleteFiles(paths: string[]) { return fetch('/api/workspace/files', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ paths }) }).then((response) => json<{ value: string[]; version: string; previewUrl: string }>(response)); }
 export function gitStatus() { return fetch('/api/workspace/git/status', { cache: 'no-store' }).then((response) => json<{ dirty: boolean; changes: Array<{ status: string; path: string }>; fingerprint: string }>(response)); }
-export function commitWorkspace() { return fetch('/api/workspace/git/commit', { method: 'POST' }).then((response) => json<{ committed: boolean; hash?: string; files?: number; message: string }>(response)); }
-export function generateCanvasImage(request: CanvasImageGenerationRequest) { return fetch('/api/workspace/assets/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }).then((response) => json<CanvasImageGenerationResult>(response)); }
+export function commitWorkspace(actions: string[] = []) { return fetch('/api/workspace/git/commit', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ actions }) }).then((response) => json<{ committed: boolean; hash?: string; files?: number; message: string }>(response)); }
+export function generateImageAsset(request: ImageAssetGenerationRequest) { return fetch('/api/workspace/assets/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }).then((response) => json<ImageAssetGenerationResult>(response)); }
 export interface UploadOptions {
   destination?: string;
   accept?: 'media' | 'image';

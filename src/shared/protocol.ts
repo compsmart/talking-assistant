@@ -59,6 +59,10 @@ export interface RecoveryState {
   workspaceVersion: string;
   lockOwner?: string;
   activeRun?: AgentRunSnapshot;
+  activeRuns?: WorkItemSnapshot[];
+  queueDepth?: number;
+  workerCapacity?: { active: number; maximum: number };
+  integrationOwner?: string;
   serverStartedAt: string;
   restartRequired: boolean;
   restartCommand: string;
@@ -73,6 +77,7 @@ export interface TaskRequest {
   includeCanvasImage?: boolean;
   referenceGrantId?: string;
   approvedPlan?: { id: string; path: string; hash: string };
+  preferredAgentId?: string;
 }
 
 export interface PlanRequest extends Omit<TaskRequest, 'approvedPlan'> {}
@@ -173,6 +178,29 @@ export interface AssistantProfile {
   photoVersion?: string;
 }
 
+export type UiSurfaceId = 'cloud' | 'paper' | 'mist' | 'ice' | 'graphite' | 'midnight' | 'slate' | 'aubergine';
+export type UiTextId = 'ink' | 'navy' | 'warm-charcoal' | 'cool-light' | 'warm-light' | 'blue-light';
+export type UiAccentId = 'mint' | 'blue' | 'violet' | 'amber' | 'rose' | 'cyan';
+export type UiScale = 'small' | 'standard' | 'large';
+export type UiDensity = 'compact' | 'comfortable' | 'spacious';
+export type UiCorners = 'sharp' | 'soft' | 'rounded';
+
+export interface UiTheme {
+  id: string;
+  name: string;
+  surface: UiSurfaceId;
+  text: UiTextId;
+  primaryAccent: UiAccentId;
+  secondaryAccent: UiAccentId;
+  scale: UiScale;
+  density: UiDensity;
+  corners: UiCorners;
+  effects: { opacity: number; blur: number; shadow: number; glow: number; lighting: number };
+}
+
+export interface UiThemeProfile { activeThemeId: string; customThemes: UiTheme[] }
+export interface UiThemeProfileResponse extends UiThemeProfile { themes: UiTheme[] }
+
 export interface WorkspaceSettings {
   mode: WorkspaceMode;
   vision: { frameRate: VisionFrameRate; quality: VisionQuality };
@@ -182,6 +210,7 @@ export interface WorkspaceSettings {
     mediaGeneration: boolean;
     validation: ValidationProfile;
     reasoningProfile: ReasoningProfile;
+    maxParallelAgents: number;
   };
   git: { commitOnFileManagerClose: 'ask' | 'always' | 'never' };
 }
@@ -341,7 +370,7 @@ export interface MediaJobSnapshot {
   error?: string;
 }
 
-export interface CanvasImageGenerationRequest {
+export interface ImageAssetGenerationRequest {
   prompt: string;
   name: string;
   transparent?: boolean;
@@ -349,7 +378,7 @@ export interface CanvasImageGenerationRequest {
   aspectRatio?: '1:1' | '3:4' | '4:3' | '9:16' | '16:9';
 }
 
-export interface CanvasImageGenerationResult {
+export interface ImageAssetGenerationResult {
   value: { ok: true; asset: AssetRecord };
   changedFiles: FileReference[];
   checks: CheckResult[];
@@ -416,3 +445,286 @@ export interface PlanningRunSnapshot {
 
 export type AgentRunSnapshot = TaskSnapshot | PlanningRunSnapshot;
 export type AgentRunResult = TaskResult | PlanResult;
+
+export type WorkStrategy = 'auto' | 'direct' | 'plan_first' | 'plan_only';
+export type WorkStatus =
+  | 'queued' | 'coordinating' | 'planning' | 'awaiting_approval' | 'running'
+  | 'integrating' | 'validating' | 'publishing' | 'needs_input' | 'cancelling'
+  | 'completed' | 'failed' | 'cancelled' | 'superseded';
+export type WorkUpdateMode = 'append' | 'correct' | 'replace';
+export type WorkRole = 'planner' | 'researcher' | 'coder' | 'reviewer' | 'resolver' | 'media';
+export type AgentStage = WorkRole;
+export type AgentProfileKind = 'builtin' | 'custom';
+export type AgentContextScope = 'global' | 'workspace';
+export type ToolRisk = 'read' | 'write' | 'execute' | 'network' | 'secret' | 'external_action';
+export type ToolSideEffectScope = 'none' | 'workspace' | 'external';
+export type SecretExposure = 'tool_only' | 'model_readable';
+
+export interface AgentRoutingRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  effect: 'prefer' | 'exclude';
+  weight: number;
+  stages?: AgentStage[];
+  capabilities?: string[];
+  keywords?: string[];
+  fileGlobs?: string[];
+  requiredTools?: string[];
+  examples?: string[];
+  negativeExamples?: string[];
+}
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  description: string;
+  kind: AgentProfileKind;
+  enabled: boolean;
+  stages: AgentStage[];
+  capabilities: string[];
+  model: string;
+  instructions: string;
+  toolIds: string[];
+  skillIds: string[];
+  contextIds: string[];
+  secretGrantIds: string[];
+  priority: number;
+  maxConcurrency: number;
+  routingRules: AgentRoutingRule[];
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentWorkspaceOverride {
+  agentId: string;
+  workspaceId: string;
+  enabled?: boolean;
+  toolIds?: string[];
+  skillIds?: string[];
+  contextIds?: string[];
+  secretGrantIds?: string[];
+  priority?: number;
+  revision: number;
+  updatedAt: string;
+}
+
+export interface AgentToolDescriptor {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  categoryId: string;
+  risks: ToolRisk[];
+  stages: AgentStage[];
+  credentialSlots: string[];
+  available: boolean;
+  availabilityReason?: string;
+  sideEffectScope: ToolSideEffectScope;
+  runtimeCapability?: string;
+  locked?: boolean;
+  /** Model/runtime function used to execute this registry capability. */
+  runtimeToolId?: string;
+  /** Arguments fixed by the capability and enforced by the runtime broker. */
+  fixedArguments?: Record<string, string | number | boolean>;
+  /** JSON-schema fragment shown by tool-directory clients. */
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+}
+export type ToolDescriptor = AgentToolDescriptor;
+
+export interface AgentToolCategoryDescriptor {
+  id: string;
+  name: string;
+  description: string;
+  order: number;
+}
+
+export interface AgentToolDirectory {
+  categories: AgentToolCategoryDescriptor[];
+  tools: AgentToolDescriptor[];
+}
+
+export interface AgentSkill {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  capabilities: string[];
+  requiredToolIds: string[];
+  requiredSecretKinds: string[];
+  contextIds: string[];
+  enabled: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentContextResource {
+  id: string;
+  name: string;
+  description: string;
+  scope: AgentContextScope;
+  workspaceId?: string;
+  content?: string;
+  fileGlobs?: string[];
+  enabled: boolean;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentSecretMetadata {
+  id: string;
+  name: string;
+  kind: string;
+  scope: AgentContextScope;
+  workspaceId?: string;
+  exposure: SecretExposure;
+  toolIds: string[];
+  agentIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+export type SecretMetadata = AgentSecretMetadata;
+
+export interface AgentSecretGrant {
+  id: string;
+  secretId: string;
+  agentId: string;
+  toolId?: string;
+  credentialSlot?: string;
+  allowModelRead: boolean;
+}
+
+export interface AgentRoutingSettings {
+  mode: 'automatic' | 'priority_first' | 'ask_on_overlap';
+  tieThreshold: number;
+  semanticWeight: number;
+  reliabilityWeight: number;
+}
+
+export interface RoutingSimulationCandidate {
+  agentId: string;
+  agentName: string;
+  eligible: boolean;
+  score?: number;
+  reasons: string[];
+  exclusions: string[];
+}
+
+export interface RoutingSimulation {
+  selectedAgentId?: string;
+  requiresUserChoice: boolean;
+  reason: string;
+  candidates: RoutingSimulationCandidate[];
+}
+
+export interface AgentConfigurationSnapshot {
+  schemaVersion: 2;
+  revision: number;
+  profiles: AgentProfile[];
+  overrides: AgentWorkspaceOverride[];
+  skills: AgentSkill[];
+  contexts: AgentContextResource[];
+  secrets: AgentSecretMetadata[];
+  secretGrants: AgentSecretGrant[];
+  routing: AgentRoutingSettings;
+}
+export type WorkAttemptStatus = 'queued' | 'running' | 'paused' | 'succeeded' | 'failed' | 'cancelling' | 'cancelled' | 'superseded';
+
+export interface WorkRequest extends TaskRequest {
+  strategy?: WorkStrategy;
+  dedupeMode?: 'auto' | 'force';
+  clientRequestId?: string;
+}
+
+export interface WorkQuestion {
+  id: string;
+  prompt: string;
+  options?: string[];
+  askedAt: string;
+  answeredAt?: string;
+  answer?: string;
+}
+
+export interface PathClaim { attemptId: string; patterns: string[]; createdAt: string }
+
+export interface WorkSubtaskSnapshot {
+  id: string;
+  workId: string;
+  role: WorkRole;
+  objective: string;
+  status: 'pending' | 'ready' | 'running' | 'integrating' | 'completed' | 'blocked' | 'cancelled';
+  dependencies: string[];
+  writeScope: string[];
+  attemptIds: string[];
+}
+
+export interface WorkerAttemptSnapshot {
+  id: string;
+  workId: string;
+  subtaskId: string;
+  role: WorkRole;
+  status: WorkAttemptStatus;
+  specRevision: number;
+  agentId?: string;
+  agentName?: string;
+  profileRevision?: number;
+  routingReason?: string;
+  baseCommit?: string;
+  branch?: string;
+  headCommit?: string;
+  changedFiles: FileReference[];
+  summary?: string;
+  error?: string;
+  startedAt?: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
+export interface WorkResult {
+  status: 'completed' | 'failed' | 'cancelled';
+  summary: string;
+  changedFiles: FileReference[];
+  checks: CheckResult[];
+  previewVersion?: string;
+  previewUrl?: string;
+  commit?: string;
+}
+
+export interface WorkItemSnapshot {
+  kind: 'work';
+  id: string;
+  workspaceId: string;
+  strategy: WorkStrategy;
+  status: WorkStatus;
+  specRevision: number;
+  request: TaskRequest;
+  fingerprint: string;
+  queuePosition?: number;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  plan?: { path: string; hash: string; baseCommit?: string };
+  subtasks: WorkSubtaskSnapshot[];
+  attempts: WorkerAttemptSnapshot[];
+  questions: WorkQuestion[];
+  result?: WorkResult;
+  duplicateOf?: string;
+  supersededBy?: string;
+}
+
+export interface WorkCommandResult {
+  disposition: 'accepted' | 'duplicate' | 'updated' | 'cancelling' | 'answered' | 'approved';
+  work: WorkItemSnapshot;
+  message: string;
+}
+
+export type WorkEvent =
+  | { type: 'work_snapshot'; work: WorkItemSnapshot }
+  | { type: 'work_removed'; workId: string }
+  | { type: 'work_notice'; workId: string; kind: 'accepted' | 'duplicate' | 'updated' | 'needs_input' | 'completed' | 'failed' | 'cancelled'; message: string; at: string }
+  | { type: 'activity_event'; workId: string; attemptId?: string; event: ActivityEvent };

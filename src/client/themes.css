@@ -1,0 +1,58 @@
+/* Theme overrides cover Cowork chrome only; workspace and authored canvas content remain unchanged. */
+html[data-ui-theme] .floating-window,html[data-ui-theme] .chat-tray,html[data-ui-theme] .agent-terminal,html[data-ui-theme] .work-center,html[data-ui-theme] .task-beacon,html[data-ui-theme] .work-beacon,html[data-ui-theme] .status-pill,html[data-ui-theme] .selection-pill { border-color:var(--ui-border);color:var(--ui-text);background:var(--ui-panel);box-shadow:0 26px 80px rgba(0,0,0,var(--ui-shadow-alpha)),0 0 34px var(--ui-light),inset 0 1px var(--ui-edge-light);backdrop-filter:blur(var(--ui-blur));border-radius:var(--ui-radius) }
+html[data-ui-theme] .floating-window { overflow:visible }
+html[data-ui-theme] .floating-window::before { content:'';position:absolute;z-index:-1;inset:-12px;border-radius:calc(var(--ui-radius) + 10px);background:radial-gradient(ellipse at 50% 0,var(--ui-light),transparent 62%);pointer-events:none }
+html[data-ui-theme] .window-handle { height:calc(34px * var(--ui-density));padding-inline:calc(13px * var(--ui-density));color:var(--ui-muted);border-color:var(--ui-border);background:linear-gradient(var(--ui-raised),var(--ui-panel));border-radius:var(--ui-radius) var(--ui-radius) 0 0;font-size:calc(10px * var(--ui-font-scale)) }
+html[data-ui-theme] .window-content { inset-block-start:calc(34px * var(--ui-density));border-radius:0 0 var(--ui-radius) var(--ui-radius) }
+html[data-ui-theme] .window-toolbar { border-color:var(--ui-border);background:var(--ui-panel-solid);box-shadow:0 14px 30px rgba(0,0,0,var(--ui-shadow-alpha)),0 0 22px var(--ui-glow) }
+html[data-ui-theme] .window-close:hover,html[data-ui-theme] .icon-button:hover { background:var(--ui-hover);color:var(--ui-text) }
+html[data-ui-theme] .icon-button.active { color:var(--ui-on-accent);background:var(--ui-accent);box-shadow:0 0 22px var(--ui-glow) }
+html[data-ui-theme] :is(.settings-window,.agents-window,.activity-window,.file-manager-window,.canvas-window,.ui-theme-window) .window-content { background:var(--ui-panel-solid);color:var(--ui-text) }
+html[data-ui-theme] :is(.settings-page section,.activity-summary,.activity-filters,.activity-list,.file-sidebar,.file-viewer-header,.canvas-tools,.canvas-layers,.work-center>header,.agent-terminal>header,.terminal-todos) { border-color:var(--ui-border) }
+html[data-ui-theme] :is(.file-sidebar,.canvas-tools,.canvas-layers,.activity-summary,.terminal-todos) { background:var(--ui-control) }
+html[data-ui-theme] :is(.activity-center,.file-manager,.canvas-editor,.settings-page,.agents-page,.agent-config) :is(input,select,textarea,button:not(.icon-button)) { border-color:var(--ui-border) }
+html[data-ui-theme] :is(.activity-center,.file-manager,.canvas-editor,.settings-page,.agents-page,.agent-config) :is(input,select,textarea) { background:var(--ui-control);color:var(--ui-text) }
+html[data-ui-theme] :is(.activity-center,.file-manager,.canvas-editor,.settings-page,.agents-page,.agent-config) button:hover:not(:disabled) { background:var(--ui-hover);color:var(--ui-text) }
+html[data-ui-theme] :is(.activity-list>button,.tree-file,.file-result-item,.canvas-layer-list>button,.work-list>button).selected,html[data-ui-theme] :is(.tree-file,.file-result-item,.canvas-layer-list>button).active { background:var(--ui-selected);border-color:var(--ui-accent) }
+html[data-ui-theme] :is(.activity-list strong,.activity-detail h2,.activity-message,.activity-detail dd,.tree-directory-label,.tree-file-open,.file-results strong,.file-viewer-header,.canvas-layers header strong,.canvas-zoom-controls span,.terminal-line pre,.work-list strong,.work-detail) { color:var(--ui-text) }
+html[data-ui-theme] :is(.activity-list time,.activity-list small,.activity-list em,.activity-detail dt,.activity-events summary,.activity-releases small,.file-current-folder,.tree-directory-label span,.tree-file-size,.file-results span,.file-empty,.canvas-live-indicator,.canvas-tools label,.canvas-size-readout,.paint-layer-label,.terminal-line time,.terminal-kind,.work-list small) { color:var(--ui-muted) }
+html[data-ui-theme] :is(.file-sort-menu,.file-row-menu,.file-inline-editor,.shell-modal) { background:var(--ui-raised);border-color:var(--ui-border);box-shadow:0 18px 44px rgba(0,0,0,var(--ui-shadow-alpha)) }
+html[data-ui-theme] :is(.shell-modal-backdrop,.drop-overlay) { background:var(--ui-overlay);backdrop-filter:blur(var(--ui-blur)) }
+html[data-ui-theme] .drop-overlay>div { border-color:var(--ui-accent);background:var(--ui-panel-solid);box-shadow:0 35px 100px rgba(0,0,0,var(--ui-shadow-alpha)),0 0 40px var(--ui-glow) }
+html[data-ui-theme] .chat-tray input { border-color:var(--ui-border);background:var(--ui-control);color:var(--ui-text) }
+html[data-ui-theme] :is(.chat-tray button,.shell-modal button,.file-viewer-header button) { background:var(--ui-accent);color:var(--ui-on-accent) }
+html[data-ui-theme] .toast { background:var(--ui-raised);color:var(--ui-danger);border-color:var(--ui-danger) }
+html[data-ui-theme] .spinner { border-color:var(--ui-border);border-top-color:var(--ui-accent) }
+html[data-ui-tone=light] .avatar-window { box-shadow:0 26px 80px rgba(0,0,0,var(--ui-shadow-alpha)),0 0 0 2px var(--ui-edge-light),0 0 36px var(--ui-light) }
+html[data-ui-tone=light] .file-viewer-body :is(.cm-editor,.cm-gutters) { background:var(--ui-raised)!important;color:var(--ui-text)!important;border-color:var(--ui-border)!important }
+html[data-ui-tone=light] .file-viewer-body :is(.cm-content,.cm-lineNumbers) { color:var(--ui-text)!important;caret-color:var(--ui-accent)!important }
+html[data-ui-tone=light] .file-viewer-body :is(.cm-activeLine,.cm-activeLineGutter) { background:var(--ui-selected)!important }
+
+.ui-theme-window { z-index:61 }
+.ui-theme-page { height:100%;display:grid;grid-template-columns:180px minmax(0,1fr);grid-template-rows:minmax(0,1fr) auto;background:var(--ui-panel-solid);color:var(--ui-text) }
+.theme-list { min-height:0;overflow:auto;padding:10px;border-right:1px solid var(--ui-border);background:var(--ui-control) }
+.theme-list header { display:flex;align-items:center;justify-content:space-between;padding:3px 4px 10px;color:var(--ui-muted);font:10px var(--mono);text-transform:uppercase;letter-spacing:.08em }
+.theme-list header button,.theme-editor button,.ui-theme-page footer button { padding:7px 9px;border:1px solid var(--ui-border);border-radius:var(--ui-radius-small);background:var(--ui-control);color:var(--ui-muted);cursor:pointer }
+.theme-list>button { width:100%;display:grid;grid-template-columns:36px minmax(0,1fr);gap:9px;align-items:center;margin-bottom:5px;padding:9px;border:1px solid transparent;border-radius:var(--ui-radius-small);background:transparent;color:var(--ui-text);cursor:pointer;text-align:left }
+.theme-list>button:hover,.theme-list>button.selected { border-color:var(--ui-border);background:var(--ui-selected) }
+.theme-list>button span { min-width:0 }.theme-list>button strong,.theme-list>button small { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }.theme-list>button strong { font-size:11px }.theme-list>button small { margin-top:3px;color:var(--ui-muted);font:8px var(--mono) }
+.theme-dots { width:36px;height:30px;padding:5px;display:flex;align-items:end;gap:3px;border:1px solid;border-radius:8px }.theme-dots b { width:9px;height:9px;border-radius:50% }
+.theme-editor { min-width:0;overflow:auto;padding:18px 20px 40px }
+.theme-editor-title { display:flex;justify-content:space-between;gap:12px;align-items:start;margin-bottom:16px }.theme-editor-title>div:last-child { display:flex;gap:6px }.theme-editor-title h2 { margin:2px 0 4px;font-size:18px }.theme-editor-title small { color:var(--ui-muted) }.theme-editor-title input { width:min(280px,100%);padding:8px 10px;border:1px solid var(--ui-border);border-radius:var(--ui-radius-small);background:var(--ui-control);color:var(--ui-text);font-size:16px;font-weight:650 }
+.theme-editor fieldset { margin:0 0 16px;padding:13px;display:grid;gap:13px;border:1px solid var(--ui-border);border-radius:var(--ui-radius) }.theme-editor fieldset:disabled { opacity:.65 }.theme-editor legend { padding:0 6px;color:var(--ui-muted);font:9px var(--mono);text-transform:uppercase;letter-spacing:.08em }.theme-editor label { display:grid;gap:7px;color:var(--ui-muted);font:9px var(--mono) }
+.theme-sample { min-height:76px;padding:11px;display:grid;grid-template-columns:1fr auto;gap:7px;align-items:center;border:1px solid;border-radius:var(--ui-radius-small) }.theme-sample span { grid-column:1/-1;padding:5px 7px;border-radius:5px }.theme-sample button { color:white!important;border:0 }
+.theme-swatches { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px }.theme-swatches button { min-width:0;display:flex;align-items:center;gap:5px;padding:5px }.theme-swatches button i { width:20px;height:20px;flex:none;border:1px solid;border-radius:5px }.theme-swatches button span { overflow:hidden;text-overflow:ellipsis }
+.theme-options { display:flex;flex-wrap:wrap;gap:5px }.theme-options button.selected,.theme-swatches button.selected,.accent-swatches button.selected { border-color:var(--ui-accent);color:var(--ui-accent);background:var(--ui-selected) }
+.accent-swatches { display:flex;gap:6px }.accent-swatches button { width:32px;height:32px;padding:4px }.accent-swatches i { display:block;width:100%;height:100%;border-radius:5px }
+.theme-effect-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 16px }.theme-effect { display:grid;gap:7px }.theme-effect span { display:flex;justify-content:space-between }.theme-effect output { color:var(--ui-text) }.theme-effect input { width:100%;accent-color:var(--ui-accent) }
+.ui-theme-page footer { grid-column:1/-1;padding:calc(10px * var(--ui-density)) 14px;display:flex;justify-content:flex-end;gap:7px;border-top:1px solid var(--ui-border);background:var(--ui-raised) }.ui-theme-page footer button:last-child { background:var(--ui-accent);color:var(--ui-on-accent) }.ui-theme-page button.danger-ghost { color:var(--ui-danger) }
+@media(max-width:680px){.ui-theme-page{grid-template-columns:145px minmax(0,1fr)}.theme-swatches{grid-template-columns:repeat(2,minmax(0,1fr))}.theme-effect-grid{grid-template-columns:1fr}}
+
+html[data-ui-theme] :is(.skin-control-button,.skin-popover) { background:var(--ui-panel);border-color:var(--ui-border);color:var(--ui-muted);backdrop-filter:blur(var(--ui-blur)) }
+html[data-ui-theme] .settings-page footer,html[data-ui-theme] .agents-page>footer { background:var(--ui-raised);border-color:var(--ui-border) }
+html[data-ui-theme] .workspace-form { background:var(--ui-control);border-color:var(--ui-accent) }
+html[data-ui-theme] .activity-events pre { background:var(--ui-control);color:var(--ui-text) }
+html[data-ui-theme] .animation-editor { background:var(--ui-panel);border-color:var(--ui-border);color:var(--ui-text);box-shadow:0 28px 90px rgba(0,0,0,var(--ui-shadow-alpha)),0 0 34px var(--ui-light);backdrop-filter:blur(var(--ui-blur)) }
+html[data-ui-theme] .animation-editor>header,html[data-ui-theme] .animation-editor>footer,html[data-ui-theme] .terminal-media { background:var(--ui-raised);border-color:var(--ui-border) }
+html[data-ui-theme] .agents-tabs button,html[data-ui-theme] .agents-page button { background:var(--ui-control);color:var(--ui-muted) }
+html[data-ui-theme] .agents-tabs button.active,html[data-ui-theme] .agents-page button:not(.ghost):not(.danger) { background:var(--ui-selected);color:var(--ui-accent) }

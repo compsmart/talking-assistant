@@ -5,8 +5,8 @@ import { html } from '@codemirror/lang-html';
 import { css } from '@codemirror/lang-css';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
-import type { WorkspaceFileDocument, WorkspaceFileNode } from '../../shared/protocol';
-import { commitWorkspace, copyFile as copyWorkspaceFile, createFile as createWorkspaceFile, deleteFiles, editFiles, gitStatus, listFiles, rawFileUrl, readFile, renameFile as renameWorkspaceFile, searchFiles } from '../files/FileClient';
+import type { AssetRecord, WorkspaceFileDocument, WorkspaceFileNode } from '../../shared/protocol';
+import { commitWorkspace, copyFile as copyWorkspaceFile, createFile as createWorkspaceFile, deleteFiles, editFiles, listFiles, rawFileUrl, readFile, renameFile as renameWorkspaceFile, searchFiles } from '../files/FileClient';
 import { formatFileSize, isPlansDirectory, parentPath, parseFileManagerView, sortWorkspaceNodes, validateFileName, type FileManagerViewPreferences, type FileSortField } from '../files/FileManagerUtils';
 import { savePlan } from '../agent/TaskClient';
 import { FloatingWindow } from './FloatingWindow';
@@ -16,22 +16,21 @@ interface Props {
   refreshKey: number;
   selectedPaths: string[];
   onSelectedPaths: (paths: string[]) => void;
-  onUpload: (files: File[], destination: string) => Promise<void>;
+  onUpload: (files: File[], destination: string) => Promise<{ value: AssetRecord[] }>;
   onExecutePlan: (path: string, expectedHash?: string) => Promise<unknown>;
   onClose: () => void;
   onVersion: (version: string) => void;
   onError: (message: string) => void;
-  commitBehavior: 'ask' | 'always' | 'never';
 }
 
-type Dialog = 'unsaved' | 'commit' | null;
+type Dialog = 'unsaved' | null;
 type TreeRoot = 'assets' | 'uploads' | 'project';
 type InlineEdit = ({ treeRoot: TreeRoot } & ({ kind: 'create'; directory: string } | { kind: 'rename'; path: string; directory: string }));
 type FileMenu = { node: WorkspaceFileNode; treeRoot: TreeRoot; left: number; top: number };
 const WORKSPACE_FILE_MIME = 'application/x-cowork-workspace-file';
 const VIEW_STORAGE_KEY = 'cowork.file-manager.view';
 
-export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPaths, onUpload, onExecutePlan, onClose, onVersion, onError, commitBehavior }: Props) {
+export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPaths, onUpload, onExecutePlan, onClose, onVersion, onError }: Props) {
   const [active, setActive] = useState<WorkspaceFileNode>();
   const [document, setDocument] = useState<WorkspaceFileDocument>();
   const [content, setContent] = useState('');
@@ -53,7 +52,8 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
   const [fileMenu, setFileMenu] = useState<FileMenu>();
   const [sortOpen, setSortOpen] = useState(false);
   const [view, setView] = useState<FileManagerViewPreferences>(() => parseFileManagerView(localStorage.getItem(VIEW_STORAGE_KEY)));
-  const openedFingerprint = useRef<string | undefined>(undefined);
+  const actionLog = useRef<string[]>([]);
+  const commitQueue = useRef<Promise<void>>(Promise.resolve());
   const deletingRef = useRef(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const sortRef = useRef<HTMLDivElement>(null);
@@ -61,8 +61,18 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
   const isPlan = !!document && /^plans\/.+\.md$/i.test(document.path);
   const operationBusy = saving || deleting || !!mutating;
 
-  useEffect(() => {
-    gitStatus().then((status) => { openedFingerprint.current = status.fingerprint; }).catch((error) => onError(error.message));
+  const logAndCommit = useCallback((actions: string[]) => {
+    actionLog.current.push(...actions);
+    const commit = async () => {
+      const pending = actionLog.current.splice(0);
+      if (!pending.length) return;
+      try { await commitWorkspace(pending); }
+      catch (error) { actionLog.current.unshift(...pending); throw error; }
+    };
+    const queued = commitQueue.current.catch(() => undefined).then(commit);
+    commitQueue.current = queued;
+    void queued.catch((error) => onError((error as Error).message));
+    return queued;
   }, [onError]);
 
   useEffect(() => { localStorage.setItem(VIEW_STORAGE_KEY, JSON.stringify(view)); }, [view]);
@@ -114,7 +124,8 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
     try {
       if (isPlan) await savePlan(document.path, content, document.hash);
       else { const result = await editFiles([{ path: document.path, mode: 'write', content, expectedHash: document.hash }]); onVersion(result.version); }
-      const refreshed = await readFile(document.path); setDocument(refreshed); setContent(refreshed.content); return refreshed.hash;
+      const refreshed = await readFile(document.path); setDocument(refreshed); setContent(refreshed.content);
+      void logAndCommit([`user updated file ${document.path}`]); return refreshed.hash;
     } catch (error) { onError((error as Error).message); return false; }
     finally { setSaving(false); }
   };
@@ -133,6 +144,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
     deletingRef.current = true; setDeleting(true);
     try {
       const result = await deleteFiles(paths); const removed = new Set(result.value);
+      void logAndCommit(result.value.map((path) => `user deleted file ${path}`));
       onVersion(result.version); onSelectedPaths(selectedPaths.filter((path) => !removed.has(path)));
       setResults((items) => items.filter((item) => !removed.has(item.path)));
       setClipboard((value) => value && removed.has(value.path) ? undefined : value);
@@ -163,10 +175,11 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
     try {
       if (inlineEdit.kind === 'create') {
         const result = await createWorkspaceFile(inlineEdit.directory, inlineName); onVersion(result.version);
-        const path = result.value.path; cancelInlineEdit(); setLocalRefreshKey((value) => value + 1); setRecentPath(path);
+        const path = result.value.path; void logAndCommit([`user created file ${path}`]); cancelInlineEdit(); setLocalRefreshKey((value) => value + 1); setRecentPath(path);
         await loadPath(path, { name: inlineName, path, kind: 'file', size: 0, previewKind: previewKindFor(path) });
       } else {
         const oldPath = inlineEdit.path; const result = await renameWorkspaceFile(oldPath, inlineName); onVersion(result.version); const path = result.value.path;
+        void logAndCommit([`user renamed file ${oldPath} to ${path}`]);
         setActive((value) => value?.path === oldPath ? { ...value, name: inlineName, path } : value);
         setDocument((value) => value?.path === oldPath ? { ...value, path } : value);
         onSelectedPaths(selectedPaths.map((selected) => selected === oldPath ? path : selected));
@@ -184,6 +197,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
     setMutating('paste');
     try {
       const result = await copyWorkspaceFile(clipboard.path, currentDirectory); onVersion(result.version);
+      void logAndCommit([`user copied file ${clipboard.path} to ${result.value.path}`]);
       setLocalRefreshKey((value) => value + 1); setRecentPath(result.value.path);
     } catch (error) { onError((error as Error).message); }
     finally { setMutating(undefined); }
@@ -196,19 +210,11 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
 
   const selectDirectory = (path: string, treeRoot: TreeRoot) => { setCurrentDirectory(path); setCurrentTreeRoot(treeRoot); };
 
-  const finishClose = async () => {
-    try {
-      const status = await gitStatus(); const changedWhileOpen = openedFingerprint.current !== undefined && status.fingerprint !== openedFingerprint.current;
-      if (!status.dirty || !changedWhileOpen || commitBehavior === 'never') { onClose(); return; }
-      if (commitBehavior === 'always') { await commitAndClose(); return; }
-      setDialog('commit');
-    } catch (error) { onError((error as Error).message); }
-  };
+  const finishClose = async () => { try { if (actionLog.current.length) void logAndCommit([]); await commitQueue.current; onClose(); } catch { /* The queued commit reports its own error and keeps the file manager open. */ } };
   const requestClose = async () => { if (dirty) { setDialog('unsaved'); return; } await finishClose(); };
   const saveAndClose = async () => { if (!await save()) return; await finishClose(); };
-  const commitAndClose = async () => { setSaving(true); try { await commitWorkspace(); setDialog(null); onClose(); } catch (error) { onError((error as Error).message); } finally { setSaving(false); } };
   const toggleSelected = (path: string) => onSelectedPaths(selectedPaths.includes(path) ? selectedPaths.filter((item) => item !== path) : [...selectedPaths, path]);
-  const uploadInto = useCallback(async (files: File[], destination: string) => { try { await onUpload(files, destination); } catch (error) { onError((error as Error).message); } }, [onError, onUpload]);
+  const uploadInto = useCallback(async (files: File[], destination: string) => { try { const result = await onUpload(files, destination); void logAndCommit(result.value.map((file) => `user uploaded file ${file.path}`)); } catch (error) { onError((error as Error).message); } }, [logAndCommit, onError, onUpload]);
   const extensions = useMemo(() => editorExtensions(active?.path || ''), [active?.path]);
   const treeRefreshKey = refreshKey + localRefreshKey;
 
@@ -243,7 +249,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
       </div>
     </FloatingWindow>
     {fileMenu && <div ref={menuRef} className="file-row-menu" style={{ left: fileMenu.left, top: fileMenu.top }} role="menu"><button role="menuitem" onClick={() => { setClipboard({ path: fileMenu.node.path, name: fileMenu.node.name }); setFileMenu(undefined); }}><FileIcon path={icons.copy} />Copy</button><button role="menuitem" disabled={operationBusy || isPlansDirectory(fileMenu.node.path)} title={isPlansDirectory(fileMenu.node.path) ? 'Generated plans cannot be renamed' : undefined} onClick={() => beginRename(fileMenu.node, fileMenu.treeRoot)}><FileIcon path={icons.rename} />Rename</button></div>}
-    {dialog && <div className="shell-modal-backdrop"><div className="shell-modal" role="dialog" aria-modal="true"><h2>{dialog === 'unsaved' ? 'Unsaved changes' : 'Commit workspace changes?'}</h2><p>{dialog === 'unsaved' ? 'Save and validate this file before closing the file manager?' : 'All saved code, uploads, and generated assets will be committed with “chore: save workspace changes”.'}</p><div>{dialog === 'unsaved' ? <><button disabled={saving} onClick={() => void saveAndClose()}>Save and close</button><button className="ghost" onClick={() => { setDocument(undefined); setDialog(null); void finishClose(); }}>Discard</button><button className="ghost" onClick={() => setDialog(null)}>Cancel</button></> : <><button disabled={saving} onClick={() => void commitAndClose()}>Commit all</button><button className="ghost" onClick={() => { setDialog(null); onClose(); }}>Not now</button></>}</div></div></div>}
+    {dialog && <div className="shell-modal-backdrop"><div className="shell-modal" role="dialog" aria-modal="true"><h2>Unsaved changes</h2><p>Save and validate this file before closing the file manager?</p><div><button disabled={saving} onClick={() => void saveAndClose()}>Save and close</button><button className="ghost" onClick={() => { setDocument(undefined); setDialog(null); void finishClose(); }}>Discard</button><button className="ghost" onClick={() => setDialog(null)}>Cancel</button></div></div></div>}
   </>;
 }
 

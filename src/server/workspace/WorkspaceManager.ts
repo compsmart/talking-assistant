@@ -13,6 +13,10 @@ import type { WorkspaceContext, WorkspaceRegistry } from './WorkspaceRegistry.js
 
 interface PreviewInspection { errors: string[]; screenshotBase64?: string; url?: string }
 interface SelectionCapture { data: string; width: number; height: number }
+interface InspectedPreviewArtifact {
+  taskId: string; fingerprint: string; mode: WorkspaceMode; image: string; container: string; target: string;
+  previousTarget: string; previousContainer: string; screenshotBase64?: string;
+}
 
 export class WorkspaceManager {
   version = 'initial';
@@ -23,7 +27,7 @@ export class WorkspaceManager {
   private activeContainer = '';
   private dockerAvailable = true;
   private snapshotCache?: { version: string; data: string };
-  private inspectedScreenshots = new Map<string, string>();
+  private inspectedArtifacts = new Map<string, InspectedPreviewArtifact>();
   private context!: WorkspaceContext;
 
   constructor(private readonly activity: ActivityHub, private readonly registry: WorkspaceRegistry) {}
@@ -49,6 +53,8 @@ export class WorkspaceManager {
   }
 
   async activateWorkspace(context: WorkspaceContext, mode: WorkspaceMode) {
+    for (const artifact of this.inspectedArtifacts.values()) await run('docker', ['rm', '-f', artifact.container], { timeout: 20_000 });
+    this.inspectedArtifacts.clear();
     const version = await this.ensureInitialRelease(context);
     if (this.dockerAvailable) await this.activateRelease(context, version, 'switch', true, mode);
     else { this.target = ''; this.activeContainer = ''; }
@@ -58,17 +64,17 @@ export class WorkspaceManager {
 
   async prepareWorkspace(context: WorkspaceContext) { return this.ensureInitialRelease(context); }
 
-  async runInSandbox(command: string, network = false, timeout = 120_000): Promise<CommandResult> {
+  async runInSandbox(command: string, network = false, timeout = 120_000, root = this.context.draftDir): Promise<CommandResult> {
     if (!this.dockerAvailable) return { code: 1, stdout: '', stderr: 'Docker Desktop is not running. Start Docker Desktop and restart the cowork server.' };
-    return run('docker', sandboxRunArgs(this.context.draftDir, command, network), { timeout });
+    return run('docker', sandboxRunArgs(root, command, network), { timeout });
   }
 
-  async validate(taskId: string, changedFiles: FileReference[] = [], mode: WorkspaceMode = 'mixed'): Promise<CheckResult[]> {
+  async validate(taskId: string, changedFiles: FileReference[] = [], mode: WorkspaceMode = 'mixed', root = this.context.draftDir): Promise<CheckResult[]> {
     const checks: CheckResult[] = [];
     const dependenciesChanged = changedFiles.some((file) => /(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json)$/.test(file.path));
-    if (dependenciesChanged || !await exists(join(this.context.draftDir, 'node_modules'))) {
+    if (dependenciesChanged || !await exists(join(root, 'node_modules'))) {
       await this.activity.emit(taskId, 'validation', 'validate', 'Installing dependencies in the isolated workspace container');
-      const install = await this.runInSandbox('npm install --no-audit --no-fund', true, 180_000);
+      const install = await this.runInSandbox('npm install --no-audit --no-fund', true, 180_000, root);
       this.emitCommand(taskId, install); checks.push(resultCheck('dependencies', install));
       if (install.code) return checks;
     } else {
@@ -77,10 +83,10 @@ export class WorkspaceManager {
     }
     for (const [name, command] of [['tests', 'npm test --if-present'], ['build', 'npm run build --if-present']] as const) {
       await this.activity.emit(taskId, 'validation', 'validate', `Running ${name}`);
-      const result = await this.runInSandbox(command, false, 180_000); this.emitCommand(taskId, result); checks.push(resultCheck(name, result));
+      const result = await this.runInSandbox(command, false, 180_000, root); this.emitCommand(taskId, result); checks.push(resultCheck(name, result));
       if (result.code) return checks;
     }
-    const inspection = await this.inspectDraft(taskId, mode);
+    const inspection = await this.inspectDraft(taskId, mode, root);
     checks.push({ name: 'browser smoke test', status: inspection.errors.length ? 'failed' : 'passed', details: inspection.errors.join('\n') || 'Workspace loaded without browser errors.' });
     return checks;
   }
@@ -140,29 +146,58 @@ export class WorkspaceManager {
     } finally { await browser.close(); }
   }
 
-  async inspectDraft(taskId: string, mode: WorkspaceMode = 'mixed'): Promise<PreviewInspection> {
+  async inspectDraft(taskId: string, mode: WorkspaceMode = 'mixed', root = this.context.draftDir): Promise<PreviewInspection> {
     if (!this.dockerAvailable) return { errors: ['Docker Desktop is not running.'] };
+    const fingerprint = await projectFingerprint(root); const cached = this.inspectedArtifacts.get(taskId);
+    if (cached && canReuseInspectedPreview(cached, fingerprint, mode)) {
+      await this.activity.emit(taskId, 'status', 'preview', 'Reusing the unchanged inspected draft preview', { previewVersion: draftPreviewVersion(taskId, fingerprint) });
+      return { errors: [], screenshotBase64: cached.screenshotBase64, url: cached.target };
+    }
     const candidate = join(this.context.candidatesDir, taskId);
-    await rm(candidate, { recursive: true, force: true }); await this.copyProject(this.context.draftDir, candidate);
-    const name = `cowork-inspect-${safeName(this.context.id)}-${safeName(taskId)}`;
-    const started = await this.buildAndRun(candidate, name, `cowork-preview:${safeName(taskId)}`);
+    await rm(candidate, { recursive: true, force: true }); await this.copyProject(root, candidate);
+    const name = `cowork-inspect-${safeName(this.context.id)}-${safeName(taskId)}-${safeName(mode)}-${fingerprint.slice(0, 8)}`;
+    const image = `cowork-preview:${safeName(taskId)}`; const started = await this.buildAndRun(candidate, name, image);
     if (!started.target) { await rm(candidate, { recursive: true, force: true }); return { errors: [started.error || 'Could not start preview'] }; }
     try {
       const inspection = await this.browserInspect(started.target, mode);
-      if (!inspection.errors.length && inspection.screenshotBase64) this.inspectedScreenshots.set(taskId, inspection.screenshotBase64);
+      if (!inspection.errors.length) {
+        const artifact: InspectedPreviewArtifact = {
+          taskId, fingerprint, mode, image, container: name, target: started.target,
+          previousTarget: cached?.previousTarget ?? this.target, previousContainer: cached?.previousContainer ?? this.activeContainer,
+          screenshotBase64: inspection.screenshotBase64,
+        };
+        this.inspectedArtifacts.set(taskId, artifact); this.target = artifact.target;
+        if (cached?.container && cached.container !== artifact.container) await run('docker', ['rm', '-f', cached.container], { timeout: 20_000 });
+        await this.activity.emit(taskId, 'status', 'preview', 'Draft preview is live while validation continues', { previewVersion: draftPreviewVersion(taskId, fingerprint) });
+      } else await run('docker', ['rm', '-f', name], { timeout: 20_000 });
       return inspection;
+    } catch (error) {
+      await run('docker', ['rm', '-f', name], { timeout: 20_000 }); throw error;
     } finally {
-      await run('docker', ['rm', '-f', name], { timeout: 20_000 });
       await rm(candidate, { recursive: true, force: true });
     }
   }
 
   async publish(taskId: string, options: { browserGuard?: boolean; mode?: WorkspaceMode } = {}) {
     const version = `${Date.now()}-${taskId.slice(0, 6)}`; const release = join(this.context.releasesDir, version);
+    const mode = options.mode || 'mixed'; const fingerprint = await projectFingerprint(this.context.draftDir);
+    const artifact = this.inspectedArtifacts.get(taskId); const reusable = canReuseInspectedPreview(artifact, fingerprint, mode) ? artifact : undefined;
     await this.copyProject(this.context.draftDir, release);
-    await this.activity.emit(taskId, 'status', 'publishing', `Building immutable preview ${version}`);
-    await this.activateRelease(this.context, version, taskId, options.browserGuard !== false, options.mode); this.version = version;
-    const inspected = this.inspectedScreenshots.get(taskId); this.snapshotCache = inspected ? { version, data: inspected } : undefined; this.inspectedScreenshots.delete(taskId);
+    if (reusable) {
+      await this.activity.emit(taskId, 'status', 'publishing', `Promoting inspected preview ${version}`);
+      const releaseImage = `cowork-preview:${safeName(this.context.id)}-${safeName(version)}`;
+      const tagged = await run('docker', ['tag', reusable.image, releaseImage], { timeout: 20_000 });
+      if (tagged.code) throw new Error(`Could not promote inspected preview: ${tagged.stderr || tagged.stdout}`);
+      const previous = reusable.previousContainer; this.target = reusable.target; this.activeContainer = reusable.container;
+      if (shouldRemovePreviousContainer(previous, reusable.container)) await run('docker', ['rm', '-f', previous], { timeout: 20_000 });
+      await this.activity.emit(taskId, 'validation', 'publishing', `Preview ${version} was already inspected and is live`);
+    } else {
+      await this.discardInspectedPreview(taskId, false);
+      await this.activity.emit(taskId, 'status', 'publishing', `Building immutable preview ${version}`);
+      await this.activateRelease(this.context, version, taskId, options.browserGuard !== false, mode);
+    }
+    this.version = version;
+    const screenshot = reusable?.screenshotBase64; this.snapshotCache = screenshot ? { version, data: screenshot } : undefined; this.inspectedArtifacts.delete(taskId);
     await writeFile(this.context.currentPath, JSON.stringify({ version })); await this.registry.touch(this.context.id);
     return { workspaceId: this.context.id, version, previewUrl: `${this.previewUrl}/?workspace=${this.context.id}&v=${version}` };
   }
@@ -206,7 +241,10 @@ export class WorkspaceManager {
     }
   }
 
-  async restoreDraft() { await rm(this.context.draftDir, { recursive: true, force: true }); await this.copyProject(join(this.context.releasesDir, this.version), this.context.draftDir); }
+  async restoreDraft(taskId?: string) {
+    if (taskId) await this.discardInspectedPreview(taskId, true);
+    await rm(this.context.draftDir, { recursive: true, force: true }); await this.copyProject(join(this.context.releasesDir, this.version), this.context.draftDir);
+  }
   async preserveFailed(taskId: string) { await this.copyProject(this.context.draftDir, join(this.context.failedDir, taskId)); }
 
   private startGateway() {
@@ -284,6 +322,14 @@ export class WorkspaceManager {
     return { error: 'Preview did not become healthy within 10 seconds' };
   }
 
+  private async discardInspectedPreview(taskId: string, notifyClient: boolean) {
+    const artifact = this.inspectedArtifacts.get(taskId); if (!artifact) return;
+    this.inspectedArtifacts.delete(taskId);
+    if (this.target === artifact.target) this.target = artifact.previousTarget;
+    await run('docker', ['rm', '-f', artifact.container], { timeout: 20_000 });
+    if (notifyClient) await this.activity.emit(taskId, 'status', 'preview', 'Draft preview was discarded; restored the last published release', { previewVersion: this.version });
+  }
+
   private async browserInspect(url: string, mode: WorkspaceMode = 'mixed'): Promise<PreviewInspection> {
     const executablePath = await findChrome(); if (!executablePath) return { errors: ['Chrome or Edge executable was not found for the browser smoke test.'] };
     const browser = await chromium.launch({ executablePath, headless: true }); const page = await browser.newPage({ viewport: { width: 1280, height: 800 } }); const errors: string[] = [];
@@ -322,12 +368,22 @@ export function sandboxRunArgs(draftDir: string, command: string, network = fals
 }
 
 export function shouldRemovePreviousContainer(previous: string, current: string) { return !!previous && previous !== current; }
+export function canReuseInspectedPreview(artifact: Pick<InspectedPreviewArtifact, 'fingerprint' | 'mode'> | undefined, fingerprint: string, mode: WorkspaceMode) {
+  return !!artifact && artifact.fingerprint === fingerprint && artifact.mode === mode;
+}
 
 function resultCheck(name: string, result: CommandResult): CheckResult { return { name, status: result.code ? 'failed' : 'passed', details: (result.code ? result.stderr || result.stdout : result.stdout).trim().slice(-4000) }; }
+function draftPreviewVersion(taskId: string, fingerprint: string) { return `draft-${safeName(taskId).slice(0, 12)}-${fingerprint.slice(0, 10)}`; }
 function safeName(value: string) { return value.toLowerCase().replace(/[^a-z0-9_.-]/g, '-').slice(0, 45); }
 function clamp(value: number, minimum: number, maximum: number) { return Math.max(minimum, Math.min(maximum, value)); }
 async function exists(path: string) { return stat(path).then(() => true).catch(() => false); }
 async function findChrome() { const candidates = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean) as string[]; for (const candidate of candidates) if (await exists(resolve(candidate))) return candidate; return ''; }
 function safeVersion(value: string) { return /^[a-zA-Z0-9_.-]+$/.test(value); }
 async function projectManifest(root: string) { const map = new Map<string, string>(); for (const file of await walkProject(root)) { const data = await readFile(file); map.set(relative(root, file).replaceAll('\\', '/'), createHash('sha256').update(data).digest('hex')); } return map; }
+async function projectFingerprint(root: string) {
+  const hash = createHash('sha256'); const files = await walkPreviewProject(root);
+  for (const file of files.sort()) { const path = relative(root, file).replaceAll('\\', '/'); hash.update(path).update('\0').update(await readFile(file)).update('\0'); }
+  return hash.digest('hex');
+}
 async function walkProject(root: string): Promise<string[]> { const output: string[] = []; for (const item of await readdir(root, { withFileTypes: true }).catch(() => [])) { if (['node_modules', '.git', 'dist', 'failed', 'releases'].includes(item.name)) continue; const path = join(root, item.name); if (item.isDirectory()) output.push(...await walkProject(path)); else if (item.isFile()) output.push(path); } return output; }
+async function walkPreviewProject(root: string): Promise<string[]> { const output: string[] = []; for (const item of await readdir(root, { withFileTypes: true }).catch(() => [])) { if (['node_modules', '.git', 'failed', 'releases'].includes(item.name)) continue; const path = join(root, item.name); if (item.isDirectory()) output.push(...await walkPreviewProject(path)); else if (item.isFile()) output.push(path); } return output; }

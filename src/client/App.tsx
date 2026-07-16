@@ -1,19 +1,23 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActivityEvent, AgentRunSnapshot, AssistantProfile, AssistantSettings, AvatarAppearanceSettings, PlanResult, TaskResult, TaskSnapshot, WorkspaceCatalog, WorkspaceMode, WorkspaceReferenceGrant, WorkspaceSelection, WorkspaceSettings } from '../shared/protocol';
+import type { ActivityEvent, AgentRunSnapshot, AssistantProfile, AssistantSettings, AvatarAppearanceSettings, PlanResult, TaskResult, TaskSnapshot, UiTheme, UiThemeProfile, UiThemeProfileResponse, WorkItemSnapshot, WorkspaceCatalog, WorkspaceMode, WorkspaceReferenceGrant, WorkspaceSelection, WorkspaceSettings } from '../shared/protocol';
 import { AvatarPanel } from './components/AvatarPanel';
 import { WorkspaceStage } from './components/WorkspaceStage';
 import { ChatTray } from './components/ChatTray';
 import { AgentTerminal } from './components/AgentTerminal';
+import { WorkCenter } from './components/WorkCenter';
 import { IconButton } from './components/IconButton';
 import { LiveClient, type LiveFunctionCall, type LiveStatus } from './live/LiveClient';
 import { MicrophoneInput } from './live/MicrophoneInput';
 import { CanvasVision } from './live/CanvasVision';
 import { SurfaceVision } from './live/SurfaceVision';
 import { cancelPlan, cancelTask, continuePlan, createPlan, createTask, executePlan, getActiveRun, getPendingPlan, watchAgentRun } from './agent/TaskClient';
+import { approveWorkPlan, cancelWork, getWork, listWork, submitWork, updateWork, watchWork as watchWorkFeed } from './agent/WorkClient';
 import type { AvatarController } from './avatar/AvatarController';
-import { editFiles, generateCanvasImage, listFiles, readFile, searchFiles, uploadFiles } from './files/FileClient';
+import { editFiles, generateImageAsset, listFiles, readFile, searchFiles, uploadFiles } from './files/FileClient';
 import { WorkspaceSettingsPanel } from './components/WorkspaceSettingsPanel';
 import { AssistantSettingsPanel } from './components/AssistantSettingsPanel';
+import { AgentsPanel } from './components/AgentsPanel';
+import { UiThemePanel } from './components/UiThemePanel';
 import { DEFAULT_CLIENT_SETTINGS } from './settings/defaults';
 import { DEFAULT_ASSISTANT_SETTINGS } from './settings/assistantDefaults';
 import { getWorkspaceSettings, saveWorkspaceSettings } from './settings/SettingsClient';
@@ -24,6 +28,8 @@ import { deleteCanvasDocument } from './canvas/CanvasStore';
 import { ActivityPanel } from './components/ActivityPanel';
 import { getActivity, recordClientError, watchActivity } from './activity/ActivityClient';
 import { listMediaJobs } from './media/MediaClient';
+import { applyUiTheme, getUiThemeProfile, saveUiThemeProfile } from './settings/UiThemeClient';
+import { DEFAULT_UI_THEME_PROFILE, activeUiTheme, allUiThemes } from '../shared/uiThemes';
 
 const Icon = ({ path }: { path: string }) => <svg viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>;
 const FileManager = lazy(() => import('./components/FileManager').then((module) => ({ default: module.FileManager })));
@@ -38,6 +44,8 @@ const paths = {
   folder: 'M10 4H2v16h20V6H12zM4 8h16v10H4z',
   canvas: 'M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m0 2v14h16V5zm3 11 3-4 2.5 3 2-2 3 5H6z',
   activity: 'M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2m2 4v2h8V7zm0 4v2h12v-2zm0 4v2h7v-2zm12.5-.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 0 0 0-5',
+  agents: 'M8 11a3 3 0 1 0 0-6a3 3 0 0 0 0 6m8-1a2.5 2.5 0 1 0 0-5a2.5 2.5 0 0 0 0 5M2 20v-2c0-3 2.7-5 6-5s6 2 6 5v2zm12.5 0v-2c0-1.5-.5-2.8-1.4-3.9c.9-.7 1.9-1.1 3.1-1.1c3 0 5.3 2 5.3 5v2z',
+  palette: 'M12 3a9 9 0 0 0 0 18h1.5a2.5 2.5 0 0 0 0-5H12a2 2 0 0 1 0-4h5.7A3.3 3.3 0 0 0 21 8.7C21 5.6 17 3 12 3M7 9a1.5 1.5 0 1 1 0-3a1.5 1.5 0 0 1 0 3m4-2a1.5 1.5 0 1 1 3 0a1.5 1.5 0 0 1-3 0m5 3a1.5 1.5 0 1 1 3 0a1.5 1.5 0 0 1-3 0M7.5 15a1.5 1.5 0 1 1 0-3a1.5 1.5 0 0 1 0 3',
   settings: 'M19.43 12.98c.04-.32.07-.65.07-.98s-.02-.66-.07-.98l2.11-1.65-2-3.46-2.49 1a7.2 7.2 0 0 0-1.69-.98L15 3.25h-4l-.37 2.68c-.6.25-1.17.58-1.69.98l-2.49-1-2 3.46 2.11 1.65c-.04.32-.07.66-.07.98s.03.66.07.98l-2.11 1.65 2 3.46 2.49-1c.52.41 1.09.74 1.69.98l.37 2.68h4l.37-2.68c.6-.25 1.17-.58 1.69-.98l2.49 1 2-3.46zM13 15.5A3.5 3.5 0 1 1 13 8a3.5 3.5 0 0 1 0 7.5',
 };
 
@@ -62,6 +70,9 @@ export function App() {
   const [task, setTask] = useState<AgentRunSnapshot>();
   const [events, setEvents] = useState<ActivityEvent[]>([]);
   const [terminalOpen, setTerminalOpen] = useState(false);
+  const [works, setWorks] = useState<WorkItemSnapshot[]>([]);
+  const [workCenterOpen, setWorkCenterOpen] = useState(false);
+  const [workEvents, setWorkEvents] = useState<Record<string, ActivityEvent[]>>({});
   const [previewVersion, setPreviewVersion] = useState<string>();
   const [workspaceId, setWorkspaceId] = useState('');
   const [catalog, setCatalog] = useState<WorkspaceCatalog>({ activeWorkspaceId: '', workspaces: [] });
@@ -84,6 +95,9 @@ export function App() {
   const [assistantPhoto, setAssistantPhoto] = useState<Blob>();
   const [assistantPhotoReady, setAssistantPhotoReady] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
+  const [uiThemesOpen, setUiThemesOpen] = useState(false);
+  const [uiThemeProfile, setUiThemeProfile] = useState<UiThemeProfileResponse>(() => ({ ...structuredClone(DEFAULT_UI_THEME_PROFILE), themes: allUiThemes(DEFAULT_UI_THEME_PROFILE) }));
   const [animationEditorJobId, setAnimationEditorJobId] = useState<string>();
   const [canvasStatus, setCanvasStatus] = useState<{ compatible: boolean; canvasId?: string; restrictionTarget?: unknown }>({ compatible: false });
   const dragDepth = useRef(0);
@@ -98,7 +112,9 @@ export function App() {
   const agentSpeakingRef = useRef(false);
   const captionFadeTimer = useRef<number | undefined>(undefined);
   const captionClearTimer = useRef<number | undefined>(undefined);
+  const uploadSequence = useRef(0);
   const taskBusy = !!task && !['completed', 'failed', 'cancelled'].includes(task.status);
+  const activeWorks = works.filter((work) => !['completed', 'failed', 'cancelled', 'superseded'].includes(work.status));
 
   const reportError = useCallback((message: string) => {
     setError(message); void recordClientError(message, message.toLocaleLowerCase().includes('live') || message.toLocaleLowerCase().includes('gemini') ? 'live' : 'system'); window.setTimeout(() => setError(''), 5500);
@@ -109,7 +125,7 @@ export function App() {
       if (canvasPanel.current) return canvasPanel.current;
       await new Promise((resolve) => window.setTimeout(resolve, 25));
     }
-    throw new Error('Canvas did not finish opening.');
+    throw new Error('The Image Editor did not finish opening.');
   }, []);
   const connectCanvasSurface = useCallback((surface: HTMLCanvasElement | null) => {
     if (!surface) { surfaceVision.current?.stop(); surfaceVision.current = null; surfaceElement.current = null; return; }
@@ -177,6 +193,8 @@ export function App() {
   useEffect(() => {
     getWorkspaceSettings().then((value) => { setSettings(value); live.configure(value); }).catch((reason) => reportError((reason as Error).message));
   }, [live, reportError]);
+
+  useEffect(() => { getUiThemeProfile().then((profile) => { setUiThemeProfile(profile); applyUiTheme(activeUiTheme(profile), true); }).catch((reason) => reportError((reason as Error).message)); }, [reportError]);
 
   useEffect(() => { getWorkspaces().then((value) => { setCatalog(value); live.configure(settings, value); }).catch((reason) => reportError((reason as Error).message)); }, [live, reportError]);
   useEffect(() => { if (catalog.workspaces.length) live.configure(settings, catalog); }, [catalog, live, settings]);
@@ -248,7 +266,10 @@ export function App() {
   const startWatching = useCallback((run: AgentRunSnapshot, reset = true) => {
     if (watchedRuns.current.has(run.id)) return;
     watchedRuns.current.add(run.id); if (reset) setEvents([]); setTask(run); setTerminalOpen(true);
-    void watchAgentRun(run.id, (event) => setEvents((items) => [...items, event]), (snapshot) => { setTask(snapshot); announceContinuation(snapshot); }).then((result) => {
+    void watchAgentRun(run.id, (event) => {
+      setEvents((items) => [...items, event]); const liveVersion = (event.data as { previewVersion?: unknown } | undefined)?.previewVersion;
+      if (typeof liveVersion === 'string') setPreviewVersion(liveVersion);
+    }, (snapshot) => { setTask(snapshot); announceContinuation(snapshot); }).then((result) => {
       if ('planId' in result) {
         if (result.status === 'completed' && result.path) { setFocusFile(result.path); setFileRefreshKey((value) => value + 1); setFileManagerOpen(true); setTerminalOpen(false); }
       } else if (result.previewVersion) setPreviewVersion(result.previewVersion);
@@ -262,7 +283,7 @@ export function App() {
     const grant = await referenceGrant.current;
     const created = await createTask({
       objective, successCriteria: Array.isArray(call.args?.successCriteria) ? call.args!.successCriteria as string[] : [],
-      selectedElement: call.args?.useSelectedElement === false ? undefined : selection, includeCanvasImage: call.args?.includeCanvasImage === true,
+      selectedElement: call.args?.useSelectedElement === false ? undefined : selection, includeCanvasImage: call.args?.includeWorkspacePreview === true,
       selectedFiles, referenceGrantId: grant?.id,
     });
     startWatching(created); return created;
@@ -273,7 +294,7 @@ export function App() {
     const grant = await referenceGrant.current;
     const created = await createPlan({
       objective, successCriteria: Array.isArray(call.args?.successCriteria) ? call.args!.successCriteria as string[] : [],
-      selectedElement: call.args?.useSelectedElement === false ? undefined : selection, includeCanvasImage: call.args?.includeCanvasImage === true,
+      selectedElement: call.args?.useSelectedElement === false ? undefined : selection, includeCanvasImage: call.args?.includeWorkspacePreview === true,
       selectedFiles, referenceGrantId: grant?.id,
     });
     startWatching(created); return created;
@@ -308,13 +329,37 @@ export function App() {
     refresh(); const timer = window.setInterval(refresh, 2500); return () => { active = false; clearInterval(timer); };
   }, [workspaceId]);
 
+  useEffect(() => {
+    if (!workspaceId) return;
+    const updateSnapshot = (work: WorkItemSnapshot) => setWorks((items) => [...items.filter((item) => item.id !== work.id), work]);
+    const close = watchWorkFeed(workspaceId, setWorks, (event) => {
+      if (event.type === 'work_snapshot') {
+        updateSnapshot(event.work); if (event.work.result?.previewVersion) setPreviewVersion(event.work.result.previewVersion);
+        if (event.work.status === 'awaiting_approval' && event.work.plan) { setFocusFile(event.work.plan.path); setFileRefreshKey((value) => value + 1); setFileManagerOpen(true); }
+      } else if (event.type === 'work_removed') setWorks((items) => items.filter((item) => item.id !== event.workId));
+      else if (event.type === 'activity_event') {
+        setWorkEvents((items) => ({ ...items, [event.workId]: [...(items[event.workId] || []), event.event].slice(-500) }));
+        const liveVersion = (event.event.data as { previewVersion?: unknown } | undefined)?.previewVersion; if (typeof liveVersion === 'string') setPreviewVersion(liveVersion);
+      }
+      else if (event.type === 'work_notice') {
+        const message = `${event.message} Task ${event.workId}.`;
+        if (!live.ready || live.inputBlocked || !live.sendText(`[WORKSPACE EVENT] ${message}`)) pendingCompletion.current = message;
+      }
+    });
+    void listWork().then(setWorks).catch(() => undefined); return close;
+  }, [live, workspaceId]);
+
   const performUpload = useCallback(async (files: File[], destination?: string) => {
+    const sequence = ++uploadSequence.current;
     setUploadProgress(0);
     try {
-      const result = await uploadFiles(files, { destination, onProgress: setUploadProgress });
+      const result = await uploadFiles(files, { destination, onProgress: (progress) => {
+        if (uploadSequence.current !== sequence) return;
+        setUploadProgress(progress >= 0.995 ? undefined : progress);
+      } });
       setPreviewVersion(result.version); setFileRefreshKey((value) => value + 1);
       return result;
-    } finally { setUploadProgress(undefined); }
+    } finally { if (uploadSequence.current === sequence) setUploadProgress(undefined); }
   }, []);
 
   const importWorkspaceFiles = useCallback(async (incoming: File[]) => {
@@ -368,34 +413,50 @@ export function App() {
 
   useEffect(() => {
     live.onToolCalls = async (calls) => {
-      live.inputBlocked = calls.some((call) => call.name === 'generate_canvas_image');
+      live.inputBlocked = calls.some((call) => call.name === 'generate_image_asset');
       let responses: Array<{ id: string; name: string; response: { result?: unknown; error?: string } }>;
       try { responses = await live.executeToolCalls(calls, async (call) => {
         try {
           let result: unknown;
-          if (call.name === 'delegate_coding_task') result = await delegate(call);
+          if (call.name === 'submit_work') {
+            const grant = await referenceGrant.current; result = await submitWork({
+              objective: String(call.args?.objective || ''), strategy: call.args?.strategy as any, dedupeMode: call.args?.dedupeMode as any, clientRequestId: call.id,
+              preferredAgentId: call.args?.preferredAgentId ? String(call.args.preferredAgentId) : undefined,
+              successCriteria: Array.isArray(call.args?.successCriteria) ? call.args.successCriteria.map(String) : [], selectedElement: call.args?.useSelectedElement === false ? undefined : selection,
+              selectedFiles, includeCanvasImage: call.args?.includeWorkspacePreview === true, referenceGrantId: grant?.id,
+            });
+          }
+          else if (call.name === 'update_work') result = await updateWork(String(call.args?.taskId || ''), { text: String(call.args?.change || ''), successCriteria: Array.isArray(call.args?.successCriteria) ? call.args.successCriteria.map(String) : [] }, call.args?.mode as any, typeof call.args?.expectedRevision === 'number' ? call.args.expectedRevision : undefined);
+          else if (call.name === 'cancel_work') result = await cancelWork(String(call.args?.taskId || ''));
+          else if (call.name === 'get_work_status') result = call.args?.taskId ? await getWork(String(call.args.taskId)) : await listWork();
+          else if (call.name === 'approve_work_plan') result = await approveWorkPlan(String(call.args?.taskId || ''), String(call.args?.path || ''), call.args?.hash ? String(call.args.hash) : undefined);
+          else if (call.name === 'answer_work_question') {
+            const response = await fetch(`/api/work/${encodeURIComponent(String(call.args?.taskId || ''))}/questions/${encodeURIComponent(String(call.args?.questionId || ''))}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ answer: String(call.args?.answer || '') }) });
+            if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || 'Could not answer the task question.'); result = await response.json();
+          }
+          else if (call.name === 'delegate_coding_task') result = await delegate(call);
           else if (call.name === 'create_implementation_plan') result = await delegatePlan(call);
           else if (call.name === 'execute_implementation_plan') result = await beginPlanExecution(String(call.args?.path || ''));
           else if (call.name === 'respond_to_planning_continuation') result = await continuePlan(String(call.args?.runId || ''), call.args?.continue !== false);
           else if (call.name === 'open_ui_component') {
             const component = String(call.args?.component || ''); const params = call.args?.params && typeof call.args.params === 'object' ? call.args.params as Record<string, unknown> : {};
             if (component === 'file_manager') {
-              if (params.addPaths !== undefined || params.tool !== undefined) throw new Error('Canvas parameters cannot be used with the file manager.');
+              if (params.addPaths !== undefined || params.tool !== undefined) throw new Error('Image Editor parameters cannot be used with the file manager.');
               const revealPath = typeof params.revealPath === 'string' ? params.revealPath : undefined;
               const selectPaths = Array.isArray(params.selectPaths) ? params.selectPaths.map(String).filter(Boolean) : [];
               if (revealPath) { setFocusFile(revealPath); setFileRefreshKey((value) => value + 1); } if (selectPaths.length) setSelectedFiles((current) => [...new Set([...current, ...selectPaths])]);
               setFileManagerOpen(true); result = { component, open: true, revealPath: revealPath || null, selectedPaths: selectPaths };
-            } else if (component === 'canvas') {
-              if (params.revealPath !== undefined || params.selectPaths !== undefined) throw new Error('File-manager parameters cannot be used with Canvas.');
+            } else if (component === 'image_editor') {
+              if (params.revealPath !== undefined || params.selectPaths !== undefined) throw new Error('File-manager parameters cannot be used with the Image Editor.');
               const panel = await openCanvasPanel(); const addPaths = Array.isArray(params.addPaths) ? params.addPaths.map(String).filter(Boolean) : [];
               const tool = typeof params.tool === 'string' && ['select', 'pan', 'brush', 'eraser', 'picker', 'magic'].includes(params.tool) ? params.tool as any : undefined;
               if (tool) panel.setTool(tool); const layerIds = addPaths.length ? await panel.addWorkspaceImages(addPaths) : [];
               result = { component, open: true, addedPaths: addPaths, layerIds, tool: tool || panel.getContext().tool };
-            } else throw new Error('Unknown UI component. Use file_manager or canvas.');
-          } else if (call.name === 'generate_canvas_image') {
+            } else throw new Error('Unknown UI component. Use file_manager or image_editor.');
+          } else if (call.name === 'generate_image_asset') {
             const panel = await openCanvasPanel(); setCanvasBusy('Generating image…');
             try {
-              const generated = await generateCanvasImage({
+              const generated = await generateImageAsset({
                 prompt: String(call.args?.prompt || ''), name: String(call.args?.name || ''), transparent: call.args?.transparent === true,
                 referenceImages: Array.isArray(call.args?.referenceImages) ? call.args.referenceImages.map(String) : [],
                 aspectRatio: call.args?.aspectRatio as any,
@@ -463,7 +524,7 @@ export function App() {
   };
 
   const toggleVision = async () => {
-    if (canvasOpen) { reportError('Canvas is shared with the Live agent automatically while it is open.'); return; }
+    if (canvasOpen) { reportError('The Image Editor is shared with the Live agent automatically while it is open.'); return; }
     if (vision.current?.active) { vision.current.stop(); setVisionOn(false); return; }
     if (!captureTarget.current) return;
     if (settings.mode === 'canvas' && !canvasStatus.compatible) { reportError('Canvas vision requires a primary canvas and Cowork layer adapter.'); return; }
@@ -521,6 +582,12 @@ export function App() {
     }
   }, [live]);
 
+  const previewUiTheme = useCallback((theme: UiTheme) => { applyUiTheme(theme, false); }, []);
+  const restoreUiTheme = useCallback(() => { applyUiTheme(activeUiTheme(uiThemeProfile), true); }, [uiThemeProfile]);
+  const saveUiThemes = useCallback(async (profile: UiThemeProfile) => {
+    const saved = await saveUiThemeProfile(profile); setUiThemeProfile(saved); applyUiTheme(activeUiTheme(saved), true);
+  }, []);
+
   const sendText = (text: string) => {
     avatar.current?.ensureAudio();
     authorizeUserTurn(text);
@@ -551,11 +618,13 @@ export function App() {
       setSelectMode(true);
     }}><Icon path={paths.select} /></IconButton>
     <IconButton label="Open workspace files" active={fileManagerOpen} onClick={() => setFileManagerOpen(true)}><Icon path={paths.folder} /></IconButton>
-    <IconButton label="Open Canvas" active={canvasOpen} onClick={() => { void openCanvasPanel(); }}><Icon path={paths.canvas} /></IconButton>
+    <IconButton label="Open Image Editor" active={canvasOpen} onClick={() => { void openCanvasPanel(); }}><Icon path={paths.canvas} /></IconButton>
   </>;
 
   const avatarHeaderActions = <>
     <IconButton label="Configure assistant appearance and personality" active={assistantOpen} onClick={() => setAssistantOpen(true)}><Icon path={paths.face} /></IconButton>
+    <IconButton label="Customize UI theme" active={uiThemesOpen} onClick={() => setUiThemesOpen(true)}><Icon path={paths.palette} /></IconButton>
+    <IconButton label="Configure subagents, tools, skills, secrets, and routing" active={agentsOpen} onClick={() => setAgentsOpen(true)}><Icon path={paths.agents} /></IconButton>
     <IconButton label={`Open activity center${activityUnresolved ? ` (${activityUnresolved} unresolved)` : ''}`} active={activityOpen} onClick={() => setActivityOpen(true)}><span className="activity-icon"><Icon path={paths.activity} />{activityUnresolved > 0 && <b>{Math.min(99, activityUnresolved)}</b>}</span></IconButton>
     <IconButton label="Open workspace settings" active={settingsOpen} onClick={() => setSettingsOpen(true)}><Icon path={paths.settings} /></IconButton>
   </>;
@@ -571,13 +640,17 @@ export function App() {
       <AvatarPanel caption={caption} captionFading={captionFading} toolbar={toolbar} headerActions={avatarHeaderActions} onReady={avatarReady} onError={reportError} />
       <ChatTray open={chatOpen} caption={caption} disabled={false} onClose={() => setChatOpen(false)} onSend={sendText} />
       {taskBusy && <button className={`task-beacon ${task?.kind || ''}`} onClick={() => setTerminalOpen(true)}>{task?.status === 'awaiting_continuation' ? <span className="continuation-mark">?</span> : <span className="spinner" />} {runLabel} · {todoProgress || task?.status}</button>}
+      {!!activeWorks.length && <button className="work-beacon" onClick={() => setWorkCenterOpen(true)}><span className="spinner" /> {activeWorks.filter((work) => ['running', 'planning', 'integrating', 'validating', 'publishing'].includes(work.status)).length} active · {activeWorks.filter((work) => work.status === 'queued').length} queued{activeWorks.some((work) => ['needs_input', 'awaiting_approval'].includes(work.status)) ? ' · action needed' : ''}</button>}
       <AgentTerminal open={terminalOpen} task={task} events={events} onClose={() => setTerminalOpen(false)} onContinue={() => { if (task?.kind === 'planning') void continuePlan(task.id, true).catch((reason) => reportError((reason as Error).message)); }} onCancel={() => task && void (task.kind === 'planning' ? cancelPlan(task.id) : cancelTask(task.id))} onOpenMedia={(id) => { setAnimationEditorJobId(id); localStorage.removeItem(`cowork.animation-editor-dismissed.${workspaceId}`); localStorage.setItem(`cowork.animation-editor.${workspaceId}`, id); }} />
-      <ActivityPanel open={activityOpen} onClose={() => setActivityOpen(false)} onError={reportError} onVersion={setPreviewVersion} onReconnectLive={() => live.restartForConfiguration()} onOpenRun={() => setTerminalOpen(true)} onOpenFile={(path) => { setFocusFile(path); setFileRefreshKey((value) => value + 1); setFileManagerOpen(true); }} onAskLive={sendText} />
-      {fileManagerOpen && <Suspense fallback={<div className="toast">Opening workspace files…</div>}><FileManager focusPath={focusFile} refreshKey={fileRefreshKey} selectedPaths={selectedFiles} onSelectedPaths={setSelectedFiles} onUpload={async (files, destination) => { await performUpload(files, destination); }} onExecutePlan={beginPlanExecution} onClose={() => setFileManagerOpen(false)} onVersion={setPreviewVersion} onError={reportError} commitBehavior={settings.git.commitOnFileManagerClose} /></Suspense>}
-      {canvasLoaded && <Suspense fallback={<div className="toast">Opening Canvas…</div>}><CanvasPanel ref={canvasPanel} open={canvasOpen} workspaceId={workspaceId} busyMessage={canvasBusy} visionActive={canvasOpen && liveStatus === 'ready'} onCompositeChange={connectCanvasSurface} onClose={() => { setCanvasOpen(false); void canvasPanel.current?.flush(); }} onError={reportError} onSaved={(path, version) => { setPreviewVersion(version); setFileRefreshKey((value) => value + 1); if (path) setFocusFile(path); }} /></Suspense>}
+      <WorkCenter open={workCenterOpen} works={works} events={workEvents} onClose={() => setWorkCenterOpen(false)} onCancel={(id) => void cancelWork(id).catch((reason) => reportError((reason as Error).message))} onApprove={(work) => { if (work.plan) void approveWorkPlan(work.id, work.plan.path, work.plan.hash).catch((reason) => reportError((reason as Error).message)); }} />
+      <ActivityPanel open={activityOpen} onClose={() => setActivityOpen(false)} onError={reportError} onVersion={setPreviewVersion} onReconnectLive={() => live.restartForConfiguration()} onOpenRun={() => activeWorks.length ? setWorkCenterOpen(true) : setTerminalOpen(true)} onOpenFile={(path) => { setFocusFile(path); setFileRefreshKey((value) => value + 1); setFileManagerOpen(true); }} onAskLive={sendText} />
+      {fileManagerOpen && <Suspense fallback={<div className="toast">Opening workspace files…</div>}><FileManager focusPath={focusFile} refreshKey={fileRefreshKey} selectedPaths={selectedFiles} onSelectedPaths={setSelectedFiles} onUpload={(files, destination) => performUpload(files, destination)} onExecutePlan={beginPlanExecution} onClose={() => setFileManagerOpen(false)} onVersion={setPreviewVersion} onError={reportError} /></Suspense>}
+      {canvasLoaded && <Suspense fallback={<div className="toast">Opening Image Editor…</div>}><CanvasPanel ref={canvasPanel} open={canvasOpen} workspaceId={workspaceId} busyMessage={canvasBusy} visionActive={canvasOpen && liveStatus === 'ready'} onCompositeChange={connectCanvasSurface} onClose={() => { setCanvasOpen(false); void canvasPanel.current?.flush(); }} onError={reportError} onSaved={(path, version) => { setPreviewVersion(version); setFileRefreshKey((value) => value + 1); if (path) setFocusFile(path); }} /></Suspense>}
       {animationEditorJobId && <Suspense fallback={<div className="toast">Opening Animation Editor…</div>}><AnimationEditorPanel jobId={animationEditorJobId} onClose={() => { localStorage.setItem(`cowork.animation-editor-dismissed.${workspaceId}`, animationEditorJobId); setAnimationEditorJobId(undefined); localStorage.removeItem(`cowork.animation-editor.${workspaceId}`); }} onError={reportError} onSaved={(paths, version) => { if (version) setPreviewVersion(version); setFileRefreshKey((value) => value + 1); setFocusFile(paths[0]); }} /></Suspense>}
       {settingsOpen && <WorkspaceSettingsPanel settings={settings} catalog={catalog} canvasCompatible={canvasStatus.compatible} taskBusy={taskBusy} onSave={saveSettings} onCreate={createManagedWorkspace} onActivate={activateManagedWorkspace} onDuplicate={duplicateManagedWorkspace} onRename={renameManagedWorkspace} onDelete={deleteManagedWorkspace} onClose={() => setSettingsOpen(false)} />}
       {assistantOpen && assistantPhotoReady && <AssistantSettingsPanel profile={assistantProfile} onPreviewAppearance={previewAssistantAppearance} onPreviewPhoto={previewAssistantPhoto} onSave={saveAssistant} onCancel={restoreAssistant} onError={reportError} onClose={() => setAssistantOpen(false)} />}
+      {uiThemesOpen && <UiThemePanel profile={uiThemeProfile} onPreview={previewUiTheme} onSave={saveUiThemes} onCancel={restoreUiTheme} onError={reportError} onClose={() => setUiThemesOpen(false)} />}
+      {agentsOpen && <AgentsPanel workspaceId={workspaceId} onError={reportError} onClose={() => setAgentsOpen(false)} />}
       {(dropActive || uploadProgress !== undefined) && <div className="drop-overlay"><div><Icon path={paths.folder} /><strong>{uploadProgress === undefined ? 'Drop media into the workspace' : 'Adding media…'}</strong><span>{uploadProgress === undefined ? 'Images become WebP · audio and video keep their format' : `${Math.round(uploadProgress * 100)}%`}</span>{uploadProgress !== undefined && <progress max={1} value={uploadProgress} />}</div></div>}
       {error && <div className="toast" role="alert">{error}</div>}
     </div>

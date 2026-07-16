@@ -18,7 +18,7 @@ export class WorkspaceGit {
       await this.command(['config', 'user.name', 'Cowork'], workspaceId);
       await this.command(['config', 'user.email', 'cowork@localhost'], workspaceId);
       await mkdir(join(context.gitDir, 'info'), { recursive: true });
-      await writeFile(join(context.gitDir, 'info', 'exclude'), 'node_modules/\ndist/\n*.log\n', 'utf8');
+      await writeFile(join(context.gitDir, 'info', 'exclude'), 'node_modules/\ndist/\nplans/\n*.log\n', 'utf8');
       await this.command(['add', '-A'], workspaceId);
       await this.command(['commit', '--allow-empty', '-m', 'chore: initialize workspace'], workspaceId);
     }
@@ -34,12 +34,13 @@ export class WorkspaceGit {
     return { dirty: changes.length > 0, changes, fingerprint: await this.fingerprint(workspaceId) };
   }
 
-  async commit(workspaceId = this.registry.active().id) {
+  async commit(workspaceId = this.registry.active().id, actions: string[] = []) {
     await this.command(['add', '-A'], workspaceId); const current = await this.status(workspaceId);
     if (!current.dirty) return { committed: false, message: 'Workspace is already clean.' };
-    await this.command(['commit', '-m', 'chore: save workspace changes'], workspaceId);
+    const message = fileManagerCommitMessage(actions);
+    await this.command(['commit', '-m', message], workspaceId);
     const hash = (await this.command(['rev-parse', '--short', 'HEAD'], workspaceId)).stdout.trim();
-    return { committed: true, hash, files: current.changes.length, message: 'chore: save workspace changes' };
+    return { committed: true, hash, files: current.changes.length, message };
   }
 
   private async command(args: string[], workspaceId: string) {
@@ -63,6 +64,13 @@ export class WorkspaceGit {
     }
     return hash.digest('hex');
   }
+}
+
+export function fileManagerCommitMessage(input: string[]) {
+  const actions = input.map((action) => action.trim().replace(/[\r\n]+/g, ' ')).filter(Boolean).slice(0, 100);
+  if (!actions.length) return 'chore: save workspace changes';
+  if (actions.length === 1) return actions[0];
+  return `user file manager activity (${actions.length} actions)\n\n${actions.map((action) => `- ${action}`).join('\n')}`;
 }
 
 async function exists(path: string) { return stat(path).then(() => true).catch(() => false); }

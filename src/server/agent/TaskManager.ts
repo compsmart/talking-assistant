@@ -101,7 +101,7 @@ export class TaskManager {
       task.result = result; this.setStatus(task, 'completed'); await this.activity.emit(task.id, 'complete', 'complete', `${result.summary}\nPublished ${changedFiles.length} changed file(s) to ${published.previewUrl}`, result);
     } catch (error) {
       const cancelled = task.cancelled || (error as Error).message === 'Task cancelled';
-      await this.workspace.preserveFailed(task.id).catch(() => undefined); await this.workspace.restoreDraft().catch(() => undefined);
+      await this.workspace.preserveFailed(task.id).catch(() => undefined); await this.workspace.restoreDraft(task.id).catch(() => undefined);
       const after = await this.tools.manifest().catch(() => new Map<string, string>()); const changedFiles = this.tools.changed(before, after);
       const result: TaskResult = { taskId: task.id, status: cancelled ? 'cancelled' : 'failed', summary: cancelled ? 'Coding task cancelled; the visible workspace was not changed.' : (error as Error).message, changedFiles, checks, retries };
       task.result = result; this.setStatus(task, result.status); await this.activity.emit(task.id, cancelled ? 'complete' : 'error', result.status, result.summary, result);

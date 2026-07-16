@@ -34,6 +34,7 @@ export function ActivityPanel({ open, onClose, onError, onVersion, onReconnectLi
         </div>
         {state?.restartRequired && <p className="activity-warning">Server-side files changed after startup. Stop the server with Ctrl+C, run <code>{state.restartCommand}</code>, then reopen this panel.</p>}
         {state?.activeRun && <div className="activity-active-run"><span>{state.activeRun.kind} agent · {state.activeRun.status}</span><button onClick={onOpenRun}>Open</button><button className="danger" disabled={busy === 'cancel'} onClick={() => void cancelActive()}>Stop</button></div>}
+        {!!state?.activeRuns?.length && <div className="activity-active-run"><span>{state.activeRuns.filter((work) => work.status !== 'queued').length} active · {state.queueDepth || 0} queued · capacity {state.workerCapacity?.active || 0}/{state.workerCapacity?.maximum || 1}</span><button onClick={onOpenRun}>Open work</button></div>}
       </section>
       <div className="activity-filters">
         <select value={scope} onChange={(event) => setScope(event.target.value as any)}><option value="active">Active workspace</option><option value="all">All workspaces</option></select>

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { config } from '../config.js';
-import { sandboxRunArgs, shouldRemovePreviousContainer } from './WorkspaceManager.js';
+import { canReuseInspectedPreview, sandboxRunArgs, shouldRemovePreviousContainer } from './WorkspaceManager.js';
 
 describe('WorkspaceManager sandbox command', () => {
   it('uses the managed coding image with the existing isolation limits', () => {
@@ -26,5 +26,12 @@ describe('WorkspaceManager preview replacement', () => {
   it('does not remove a restarted release that reused its previous container name', () => {
     expect(shouldRemovePreviousContainer('cowork-preview-workspace-initial', 'cowork-preview-workspace-initial')).toBe(false);
     expect(shouldRemovePreviousContainer('cowork-preview-old', 'cowork-preview-new')).toBe(true);
+  });
+
+  it('reuses an inspected image only for the exact source and workspace mode', () => {
+    const artifact = { fingerprint: 'source-a', mode: 'mixed' as const };
+    expect(canReuseInspectedPreview(artifact, 'source-a', 'mixed')).toBe(true);
+    expect(canReuseInspectedPreview(artifact, 'source-b', 'mixed')).toBe(false);
+    expect(canReuseInspectedPreview(artifact, 'source-a', 'canvas')).toBe(false);
   });
 });

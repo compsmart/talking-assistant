@@ -149,10 +149,10 @@ export const CanvasPanel = forwardRef<CanvasPanelHandle, Props>(function CanvasP
   }, [applySnapshot]);
 
   const addWorkspaceImages = useCallback(async (paths: string[], placement?: CanvasPlacement) => {
-    const canvas = fabric.current; if (!canvas) throw new Error('Canvas is still opening.');
+    const canvas = fabric.current; if (!canvas) throw new Error('The Image Editor is still opening.');
     const ids: string[] = [];
     for (const path of paths) {
-      if (!isImagePath(path)) { onError(`${path} is not a supported Canvas image.`); continue; }
+      if (!isImagePath(path)) { onError(`${path} is not a supported Image Editor asset.`); continue; }
       const id = crypto.randomUUID(); const image = await objectForPath(path, id, placement).catch((error) => { onError(`Could not add ${path}: ${(error as Error).message}`); return undefined; });
       if (!image) continue;
       canvas.add(image); canvas.setActiveObject(image); ids.push(id); setSelectedId(id);
@@ -339,8 +339,8 @@ export const CanvasPanel = forwardRef<CanvasPanelHandle, Props>(function CanvasP
   const saveImage = async () => {
     renderComposite(); setSaving(true);
     try {
-      const blob = await canvasBlob(composite.current!, 'image/webp', .92); if (!blob) throw new Error('Could not encode the Canvas as WebP.');
-      const filename = `canvas-${new Date().toISOString().replace(/[:.]/g, '-')}.webp`;
+      const blob = await canvasBlob(composite.current!, 'image/webp', .92); if (!blob) throw new Error('Could not encode the Image Editor composition as WebP.');
+      const filename = `image-editor-${new Date().toISOString().replace(/[:.]/g, '-')}.webp`;
       const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = filename; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       const result = await uploadFiles([new File([blob], filename, { type: 'image/webp' })], { accept: 'image' }); const record = result.value[0]; onSaved(record.path, result.version);
     } catch (error) { onError((error as Error).message); }
@@ -359,15 +359,15 @@ export const CanvasPanel = forwardRef<CanvasPanelHandle, Props>(function CanvasP
   }), [addWorkspaceImages, persist, selectedId, serializeLayers, tool]);
 
   return <div className={`canvas-panel-host ${open ? 'open' : ''}`} onPointerDown={() => { panelActive.current = true; }}>
-    <FloatingWindow id="canvas" title="Canvas" initial={{ x: 120, y: 54, width: 940, height: 680 }} minWidth={650} minHeight={470} className="canvas-window" onClose={onClose}
+    <FloatingWindow id="canvas" title="Image Editor" initial={{ x: 120, y: 54, width: 940, height: 680 }} minWidth={650} minHeight={470} className="canvas-window" onClose={onClose}
       headerActions={<span className={`canvas-live-indicator ${visionActive ? 'active' : ''}`}><i /> Live vision</span>}>
       <div className="canvas-editor">
-        <div className="canvas-tools" role="toolbar" aria-label="Canvas tools">
+        <div className="canvas-tools" role="toolbar" aria-label="Image Editor tools">
           {(['select', 'pan', 'brush', 'eraser', 'picker', 'magic'] as CanvasTool[]).map((item) => <button key={item} className={tool === item ? 'active' : ''} onClick={() => setTool(item)}>{item === 'magic' ? 'Magic Select' : item}</button>)}
           {tool === 'brush' && <label>Color <input type="color" value={color} onChange={(event) => setColor(event.target.value)} /></label>}
           {(tool === 'brush' || tool === 'eraser') && <><label>Size <input type="range" min="1" max="100" value={brushSize} onChange={(event) => setBrushSize(Number(event.target.value))} /><span>{brushSize}</span></label><label>Opacity <input type="range" min="0.05" max="1" step="0.05" value={opacity} onChange={(event) => setOpacity(Number(event.target.value))} /></label></>}
           {tool === 'magic' && <><label>Match <input type="range" min="0" max="128" value={magicTolerance} onChange={(event) => { const value = Number(event.target.value); setMagicTolerance(value); renderMagicSelection(value); }} /><span>{magicTolerance}</span></label><button disabled={!magicPixels} onClick={deleteMagicPixels}>Delete pixels{magicPixels ? ` (${magicPixels.toLocaleString()})` : ''}</button></>}
-          <span className="canvas-size-readout">{CANVAS_WIDTH} × {CANVAS_HEIGHT} px</span><div className="canvas-zoom-controls"><button aria-label="Zoom out" onClick={() => changeZoom(zoom / 1.2)}>−</button><span>{Math.round(zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(zoom * 1.2)}>+</button><button aria-label="Fit Canvas" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>Fit</button></div>
+          <span className="canvas-size-readout">{CANVAS_WIDTH} × {CANVAS_HEIGHT} px</span><div className="canvas-zoom-controls"><button aria-label="Zoom out" onClick={() => changeZoom(zoom / 1.2)}>−</button><span>{Math.round(zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(zoom * 1.2)}>+</button><button aria-label="Fit image" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>Fit</button></div>
           <button disabled={historyIndex.current <= 0} onClick={() => void undo()}>Undo</button><button disabled={historyIndex.current >= history.current.length - 1} onClick={() => void redo()}>Redo</button>
           <button disabled={saving} onClick={() => void saveImage()}>{saving ? 'Saving…' : 'Save WebP'}</button><button className="danger" onClick={() => setClearOpen(true)}>Clear</button>
         </div>
@@ -390,7 +390,7 @@ export const CanvasPanel = forwardRef<CanvasPanelHandle, Props>(function CanvasP
         </div>
       </div>
     </FloatingWindow>
-    {clearOpen && <div className="shell-modal-backdrop"><div className="shell-modal" role="dialog" aria-modal="true"><h2>Clear Canvas?</h2><p>This removes every image and brush stroke. You can undo it until the page is reloaded.</p><div><button onClick={clear}>Clear Canvas</button><button className="ghost" onClick={() => setClearOpen(false)}>Cancel</button></div></div></div>}
+    {clearOpen && <div className="shell-modal-backdrop"><div className="shell-modal" role="dialog" aria-modal="true"><h2>Clear Image Editor?</h2><p>This removes every image and brush stroke. You can undo it until the page is reloaded.</p><div><button onClick={clear}>Clear Image Editor</button><button className="ghost" onClick={() => setClearOpen(false)}>Cancel</button></div></div></div>}
   </div>;
 });
 

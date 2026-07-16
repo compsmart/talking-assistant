@@ -11,7 +11,8 @@ describe('Gemini Live system prompt', () => {
   it('appends personality instructions after the core cowork instructions', () => {
     const assistant = { ...DEFAULT_ASSISTANT_SETTINGS, personalityPrompt: 'Talk like an angry pirate.' };
     const prompt = systemPrompt(DEFAULT_CLIENT_SETTINGS, assistant);
-    expect(prompt).toContain('Use create_implementation_plan for architectural work');
+    expect(prompt).toContain('Delegate substantial work with submit_work');
+    expect(prompt).toContain('never acknowledge, name, or refer to an assistant or coordinator');
     expect(prompt).toMatch(/USER-CONFIGURED PERSONALITY AND SPEAKING STYLE\]\nTalk like an angry pirate\.$/);
   });
 
@@ -22,18 +23,32 @@ describe('Gemini Live system prompt', () => {
     expect(liveSetup(DEFAULT_CLIENT_SETTINGS, assistant, 'session-1').sessionResumption).toEqual({ handle: 'session-1' });
   });
 
-  it('declares shell component and Canvas image tools when media generation is enabled', () => {
+  it('declares Image Editor tools without exposing the old shell Canvas names', () => {
     const declarations = liveSetup(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS).tools[0].functionDeclarations;
-    expect(declarations.map((item: any) => item.name)).toEqual(expect.arrayContaining(['open_ui_component', 'generate_canvas_image', 'create_implementation_plan', 'execute_implementation_plan', 'respond_to_planning_continuation', 'get_agent_run_status']));
-    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('While Canvas is open, your image input is the current static Canvas composition');
-    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('Agent starts return immediately');
-    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('never apply that continuation to a different request');
+    const names = declarations.map((item: any) => item.name);
+    const opener = declarations.find((item: any) => item.name === 'open_ui_component');
+    const submit = declarations.find((item: any) => item.name === 'submit_work');
+    expect(names).toEqual(expect.arrayContaining(['open_ui_component', 'generate_image_asset', 'submit_work', 'update_work', 'cancel_work', 'get_work_status']));
+    expect(names).not.toContain('generate_canvas_image');
+    expect(opener.parameters.properties.component.enum).toEqual(['file_manager', 'image_editor']);
+    expect(submit.parameters.properties).toHaveProperty('includeWorkspacePreview');
+    expect(submit.parameters.properties).not.toHaveProperty('includeCanvasImage');
+    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('While the Image Editor is open, your image input is its current static composition');
+    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('Work starts return immediately');
+    expect(systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS)).toContain('always in first person');
   });
 
-  it('keeps the UI opener but hides Canvas generation when media generation is disabled', () => {
+  it('requires clarification before acting on an unresolved canvas reference', () => {
+    const prompt = systemPrompt(DEFAULT_CLIENT_SETTINGS, DEFAULT_ASSISTANT_SETTINGS);
+    expect(prompt).toContain('Never open the Image Editor or generate an image merely because a workspace change mentions canvas');
+    expect(prompt).toContain("Do you mean the workspace's HTML5 canvas, or an image in the Image Editor?");
+    expect(prompt).toContain('call no mutating, editor-opening, or generation tool until the user answers');
+  });
+
+  it('keeps the UI opener but hides image generation when media generation is disabled', () => {
     const settings = { ...DEFAULT_CLIENT_SETTINGS, codingAgent: { ...DEFAULT_CLIENT_SETTINGS.codingAgent, mediaGeneration: false } };
     const names = liveSetup(settings, DEFAULT_ASSISTANT_SETTINGS).tools[0].functionDeclarations.map((item: any) => item.name);
-    expect(names).toContain('open_ui_component'); expect(names).not.toContain('generate_canvas_image');
+    expect(names).toContain('open_ui_component'); expect(names).not.toContain('generate_image_asset');
   });
 });
 

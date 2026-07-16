@@ -2,6 +2,9 @@ import { GoogleGenAI } from '@google/genai';
 import type { ActivityHub } from '../activity.js';
 import { config } from '../config.js';
 import type { WorkspaceTools } from '../workspace/WorkspaceTools.js';
+import type { AgentRuntimeProfile } from './CodingAgent.js';
+import { ToolCatalog } from '../agents/ToolCatalog.js';
+import { ToolBroker } from '../agents/ToolBroker.js';
 
 export const PLANNING_SYSTEM = `You are the read-only software architect for a local cowork application. Explore the generated project thoroughly and produce a decision-complete implementation plan for a separate coding agent.
 
@@ -29,10 +32,11 @@ const TOOLS = [
   tool('search_reference_files', 'Search a user-authorized source workspace.', { workspace: stringProp('Exact workspace name'), query: stringProp('Text to find'), path: stringProp('Relative root, default .') }, ['workspace', 'query']),
 ];
 export const PLANNING_TOOL_NAMES = TOOLS.map((item) => item.name);
+const TOOL_BROKER = new ToolBroker(new ToolCatalog(), TOOLS as any);
 export const PLANNING_SEGMENT_LIMIT = 80;
 
 interface PendingCall { id: string; name: string; initialArguments?: unknown; argumentFragments: string }
-export interface PlanningContinuationState { previousInteractionId: string; input: any; interactionCount: number; segment: number }
+export interface PlanningContinuationState { previousInteractionId: string; input: any; interactionCount: number; segment: number; statelessHistory?: any[]; disclosedSecrets?: string[] }
 export type PlanningOutcome =
   | { status: 'completed'; content: string; interactionCount: number; segment: number }
   | { status: 'paused'; reason: 'step_limit' | 'timeout'; message: string; continuation: PlanningContinuationState };
@@ -43,8 +47,9 @@ export class PlanningAgent {
     if (config.geminiKey) this.client = new GoogleGenAI({ apiKey: config.geminiKey });
   }
 
-  async perform(runId: string, prompt: string, cancelled: () => boolean, referenceWorkspaceIds: string[] = [], continuation?: PlanningContinuationState): Promise<PlanningOutcome> {
+  async perform(runId: string, prompt: string, cancelled: () => boolean, referenceWorkspaceIds: string[] = [], continuation?: PlanningContinuationState, agent?: AgentRuntimeProfile): Promise<PlanningOutcome> {
     if (!this.client) throw new Error('GEMINI_API_KEY is not configured on the server.');
+    if (agent?.modelReadableSecrets?.length) return this.performStateless(runId, prompt, cancelled, referenceWorkspaceIds, continuation, agent);
     let input: any = continuation?.input ?? prompt; let previousInteractionId = continuation?.previousInteractionId || '';
     let interactionCount = continuation?.interactionCount || 0; const segment = (continuation?.segment || 0) + 1;
     for (let iteration = 0; iteration < PLANNING_SEGMENT_LIMIT; iteration++) {
@@ -53,8 +58,9 @@ export class PlanningAgent {
       const pending = new Map<number, PendingCall>(); let interactionId = ''; let requiresAction = false; let output = '';
       try {
         const stream = await (this.client as any).interactions.create({
-          model: config.plannerModel, input, ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
-          system_instruction: PLANNING_SYSTEM, tools: TOOLS.filter((item) => referenceWorkspaceIds.length || !item.name.includes('reference_')),
+          model: agent?.modelId || config.plannerModel, input, ...(previousInteractionId ? { previous_interaction_id: previousInteractionId } : {}),
+          system_instruction: agent?.instructions?.trim() ? `${PLANNING_SYSTEM}\n\nConfigured worker identity: ${agent.name}\nAdditional instructions:\n${agent.instructions.trim()}` : PLANNING_SYSTEM,
+          tools: TOOL_BROKER.compile({ stage: 'planner', grantedToolIds: agent?.enabledToolIds }).filter((item) => referenceWorkspaceIds.length || !item.name.includes('reference_')),
           generation_config: { thinking_level: 'medium', thinking_summaries: 'auto' }, store: true, stream: true,
         }, { timeout: config.taskTimeoutMs });
 
@@ -92,10 +98,46 @@ export class PlanningAgent {
         try { return { call, args: serialized ? JSON.parse(serialized) : {} }; }
         catch { throw new Error(`Invalid arguments from planning model for ${call.name}: ${serialized}`); }
       });
-      const values = await Promise.all(calls.map(({ call, args }) => this.tools.execute(runId, call.name, args, cancelled, undefined, referenceWorkspaceIds, 'planning')));
+      const values = await Promise.all(calls.map(({ call, args }) => { TOOL_BROKER.authorize({ stage: 'planner', grantedToolIds: agent?.enabledToolIds }, call.name, args); return this.tools.execute(runId, call.name, args, cancelled, undefined, referenceWorkspaceIds, 'planning'); }));
       input = calls.map(({ call }, index) => ({ type: 'function_result', name: call.name, call_id: call.id, result: [{ type: 'text', text: JSON.stringify(values[index]) }] }));
     }
     return { status: 'paused', reason: 'step_limit', message: `The planning agent used its ${PLANNING_SEGMENT_LIMIT}-interaction segment before completing the plan. Its interaction chain and pending tool results are preserved.`, continuation: { previousInteractionId, input, interactionCount, segment } };
+  }
+
+  private async performStateless(runId: string, prompt: string, cancelled: () => boolean, referenceWorkspaceIds: string[], continuation: PlanningContinuationState | undefined, agent: AgentRuntimeProfile): Promise<PlanningOutcome> {
+    const segment = (continuation?.segment || 0) + 1; let interactionCount = continuation?.interactionCount || 0;
+    const history: any[] = continuation?.statelessHistory || [{ type: 'user_input', content: [{ type: 'text', text: prompt }] }]; const disclosed = continuation?.disclosedSecrets || [];
+    const tools = TOOL_BROKER.compile({ stage: 'planner', grantedToolIds: agent.enabledToolIds }).filter((item) => referenceWorkspaceIds.length || !item.name.includes('reference_'));
+    const readSecret = tool('read_secret', 'Read one explicitly authorized model-readable credential on demand.', { secretId: stringProp('Authorized secret ID') }, ['secretId']);
+    for (let iteration = 0; iteration < PLANNING_SEGMENT_LIMIT; iteration++) {
+      if (cancelled()) throw new Error('Planning cancelled');
+      try {
+        const interaction: any = await (this.client as any).interactions.create({ model: agent.modelId || config.plannerModel, input: history, store: false,
+          system_instruction: agent.instructions?.trim() ? `${PLANNING_SYSTEM}\n\nConfigured worker identity: ${agent.name}\nAdditional instructions:\n${agent.instructions.trim()}` : PLANNING_SYSTEM,
+          tools: [...tools, readSecret], generation_config: { thinking_level: 'medium', thinking_summaries: 'auto' },
+        }, { timeout: config.taskTimeoutMs });
+        interactionCount++; const steps = Array.isArray(interaction.steps) ? interaction.steps : []; history.push(...steps);
+        for (const step of steps) if (step.type === 'thought') for (const part of step.summary || []) if (part.text) await this.activity.emit(runId, 'thought_summary', 'planning', redact(part.text, disclosed));
+        const calls = steps.filter((step: any) => step.type === 'function_call');
+        if (!calls.length) {
+          const content = steps.filter((step: any) => step.type === 'model_output').flatMap((step: any) => step.content || []).map((part: any) => part.text || '').join('').trim();
+          if (!content) throw new Error('The planning agent returned an empty plan.'); await this.activity.emit(runId, 'model_output', 'planning', redact(content, disclosed));
+          return { status: 'completed', content: redact(content, disclosed), interactionCount, segment };
+        }
+        for (const call of calls) {
+          const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments || '{}') : call.arguments || {}; let value: any;
+          if (call.name === 'read_secret') {
+            const secretId = String(args.secretId || ''); if (!agent.modelReadableSecrets!.some((secret) => secret.id === secretId) || !agent.readSecret) throw new Error('That secret is not authorized for this agent.');
+            value = await agent.readSecret(secretId); disclosed.push(value);
+          } else { TOOL_BROKER.authorize({ stage: 'planner', grantedToolIds: agent.enabledToolIds }, call.name, args); value = await this.tools.execute(runId, call.name, args, cancelled, undefined, referenceWorkspaceIds, 'planning', disclosed); }
+          history.push({ type: 'function_result', name: call.name, call_id: call.id, result: [{ type: 'text', text: typeof value === 'string' ? value : JSON.stringify(value) }] });
+        }
+      } catch (error) {
+        if (!isRecoverableTimeout(error) || cancelled()) throw error;
+        return { status: 'paused', reason: 'timeout', message: 'The stateless planning model timed out. Its volatile in-memory history is preserved for this server session.', continuation: { previousInteractionId: '', input: '', interactionCount, segment, statelessHistory: history, disclosedSecrets: disclosed } };
+      }
+    }
+    return { status: 'paused', reason: 'step_limit', message: `The planning agent used its ${PLANNING_SEGMENT_LIMIT}-interaction stateless segment before completing the plan.`, continuation: { previousInteractionId: '', input: '', interactionCount, segment, statelessHistory: history, disclosedSecrets: disclosed } };
   }
 }
 
@@ -104,3 +146,4 @@ function isRecoverableTimeout(error: unknown) { return /timeout|timed out|deadli
 function tool(name: string, description: string, properties: Record<string, any>, required: string[] = []) { return { type: 'function', name, description, parameters: { type: 'object', properties, ...(required.length ? { required } : {}) } }; }
 function stringProp(description: string) { return { type: 'string', description }; }
 function numberProp(description: string) { return { type: 'number', description }; }
+function redact(value: string, secrets: readonly string[]) { return secrets.filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), String(value)); }

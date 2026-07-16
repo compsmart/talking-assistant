@@ -2,7 +2,9 @@ import { GoogleGenAI } from '@google/genai';
 import type { ActivityHub } from '../activity.js';
 import { config } from '../config.js';
 import type { WorkspaceTools } from '../workspace/WorkspaceTools.js';
-import type { WorkspaceSettings } from '../../shared/protocol.js';
+import type { MediaJobKind, WorkspaceSettings } from '../../shared/protocol.js';
+import { BUILTIN_AGENT_TOOLS, ToolCatalog } from '../agents/ToolCatalog.js';
+import { ToolBroker } from '../agents/ToolBroker.js';
 
 const BASE_SYSTEM = `You are the only coding subagent in a local cowork application. Work autonomously and make production-quality changes inside the generated project workspace.
 
@@ -15,10 +17,11 @@ Workspace contract:
 - When the prompt includes a selected DOM element, use its exact text, attributes, and selector to search for the owning source first. For a surgical text or style request, do not list and read the whole repository.
 - Preserve existing data-cowork-id attributes. Add concise, stable data-cowork-id values to newly created major sections and interactive controls so later visual selections map cleanly back to source; do not clutter every decorative child.
 - Use install_dependencies only when package dependencies changed. The independent validator owns routine tests, builds, and final preview inspection; do not run them yourself.
+- Keep the workspace HTML5 canvas distinct from raster media. A request to change a canvas, Canvas workspace, or selected semantic canvas layer is a request to edit the workspace implementation. Never delegate media merely because the task mentions canvas; delegate only when the user explicitly requests a new image or other media asset.
 - Delegate AI-created images, video, animation, music, and sound effects to delegate_media_task. It immediately returns stable placeholder paths; integrate those exact paths while the independent Media Agent works. Never substitute hand-coded drawings for requested generated media.
 - Animation requires an explicit startFrame. For a seamless animation, use the same workspace-relative image as startFrame and endFrame. The Media Agent owns endpoint geometry, alpha, timing, audio, inspection, and encoding.
 - Generated assets are organized under assets/generated. A transparent animation is always a four-second, 48-frame, 12 FPS WebP and may include a synchronized MP3 sidecar. Ensure the project serves these formats correctly.
-- Use remove_image_background to transform an existing opaque image; when generating a new transparent subject, use generate_image with transparent true instead. Use extract_image_regions to split an existing sprite, symbol, icon, or object sheet into separate transparent assets. Processed outputs are organized under assets/processed. Prefer these tools over installing image libraries or writing disposable processing scripts.
+- Use remove_image_background to transform an existing opaque image; when generating a new transparent subject, use delegate_media_task with kind image and transparent true instead. Use extract_image_regions to split an existing sprite, symbol, icon, or object sheet into separate transparent assets. Processed outputs are organized under assets/processed. Prefer these tools over installing image libraries or writing disposable processing scripts.
 - The independent validator performs a browser smoke test. Use inspect_preview yourself only when visual judgment is necessary or the requested result is ambiguous.
 - For approved plans or work with several meaningful steps, create a todo list before the first workspace mutation. Keep exactly one step in progress, update the list as work advances or becomes blocked, and do not return your final summary while any step remains pending or in progress.
 - Do not narrate before tool calls. Finish with a concise user-facing summary listing what changed and important file paths. Do not claim validation that the independent validator has not yet performed.`;
@@ -34,9 +37,19 @@ const TOOLS = [
   tool('search_reference_files', 'Search text in a user-authorized, read-only source workspace.', { workspace: stringProp('Exact workspace name'), query: stringProp('Text to find'), path: stringProp('Relative root path') }, ['workspace', 'query']),
   tool('copy_reference_file', 'Copy one regular file byte-for-byte from a user-authorized source workspace into the active workspace. The source remains unchanged.', { workspace: stringProp('Exact workspace name'), sourcePath: stringProp('Source workspace-relative file'), destinationPath: stringProp('Active workspace-relative destination') }, ['workspace', 'sourcePath', 'destinationPath']),
   tool('run_command', 'Run a Node.js/npm project command with the file utility inside an isolated Docker container without network access. Python is not installed.', { command: stringProp('Shell command to run from /workspace') }, ['command']),
+  tool('project.run_tests', 'Run only the test script declared by the workspace package.json.', {}),
+  tool('project.run_build', 'Run only the build script declared by the workspace package.json.', {}),
+  tool('project.run_typecheck', 'Run only the typecheck script declared by the workspace package.json.', {}),
+  tool('project.run_lint', 'Run only the lint script declared by the workspace package.json.', {}),
+  tool('package.lookup', 'Read bounded metadata for one package from the public npm registry. This never installs packages.', { name: stringProp('Exact npm package name') }, ['name']),
+  tool('workspace.http_request', 'Send an HTTP request only to the active workspace preview.', { path: stringProp('Preview-relative URL path'), method: { type: 'string', enum: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] }, body: stringProp('Optional request body') }, ['path']),
+  tool('calculate', 'Evaluate a bounded arithmetic expression with an allowlisted parser; no JavaScript evaluation.', { expression: stringProp('Arithmetic expression using numbers, parentheses, +, -, *, /, %, and ^') }, ['expression']),
+  tool('datetime', 'Parse, format, or offset an ISO date and time.', { value: stringProp('ISO date; defaults to the current time'), addMilliseconds: numberProp('Signed offset in milliseconds'), timeZone: stringProp('IANA time zone for formatting') }),
+  tool('regex.test', 'Test a bounded regular expression in a disposable worker with a hard timeout.', { pattern: stringProp('Regular expression source'), input: stringProp('Input text'), flags: stringProp('Optional flags') }, ['pattern', 'input']),
+  tool('content.hash', 'Hash bounded text content.', { content: stringProp('Text content'), algorithm: { type: 'string', enum: ['sha256', 'sha512'] } }, ['content']),
   tool('install_dependencies', 'Install project dependencies inside an isolated Docker container with temporary registry network access.', { command: stringProp('Install command, usually npm install') }),
   tool('inspect_preview', 'Build and open the current draft in a real browser, returning runtime diagnostics and a screenshot.', {}),
-  tool('delegate_media_task', 'Create a persistent Media Agent job and immediately reserve valid stable placeholder paths. Use for images, video, transparent animation, music, and sound effects.', {
+  tool('delegate_media_task', 'Create a persistent Media Agent job and immediately reserve valid stable placeholder paths. Use only for an explicit request for a new image, video, transparent animation, music, or sound-effect asset; never use it to modify a workspace HTML5 canvas.', {
     kind: { type: 'string', enum: ['image', 'video', 'animation', 'music', 'sound-effect'] }, prompt: stringProp('Detailed creative brief including composition, motion, timing, or audio intent'), name: stringProp('Stable output filename stem'), transparent: { type: 'boolean' },
     startFrame: stringProp('Required workspace-relative endpoint for animation'), endFrame: stringProp('Optional final endpoint; use the same path for a seamless animation'), referenceImages: arrayProp('Workspace-relative identity or style references'), aspectRatio: { type: 'string', enum: ['1:1', '3:4', '4:3', '9:16', '16:9'] }, soundEffects: stringProp('Optional synchronized sound-effect brief'), durationSeconds: numberProp('Audio duration'), musicTier: { type: 'string', enum: ['clip', 'pro'] },
   }, ['kind', 'prompt', 'name']),
@@ -51,8 +64,12 @@ const TOOLS = [
     connectivity: { type: 'number', enum: [4, 8] }, minArea: numberProp('Minimum connected foreground pixel area; defaults to 64'), padding: numberProp('Pixels of context around each region; defaults to 2'), maxRegions: numberProp('Maximum outputs from 1 to 200; defaults to 100'),
   }, ['sourcePath', 'outputPrefix']),
 ];
+const MEDIA_TOOL_KINDS = Object.fromEntries(BUILTIN_AGENT_TOOLS
+  .filter((item) => item.runtimeToolId === 'delegate_media_task' && typeof item.fixedArguments?.kind === 'string')
+  .map((item) => [item.id, item.fixedArguments!.kind as MediaJobKind])) as Record<string, MediaJobKind>;
 export const CODING_TOOL_NAMES = TOOLS.map((item) => item.name);
 export const CODING_TOOL_DEFINITIONS = TOOLS;
+const TOOL_BROKER = new ToolBroker(new ToolCatalog(), TOOLS as any);
 
 interface PendingCall {
   id: string;
@@ -72,6 +89,16 @@ export interface AgentPerformance {
 }
 
 export interface TaskProfile { surgical: boolean; thinkingLevel: 'low' | 'medium'; summaries: boolean }
+export interface AgentRuntimeProfile {
+  id: string;
+  name: string;
+  revision: number;
+  modelId?: string;
+  instructions?: string;
+  enabledToolIds?: string[];
+  modelReadableSecrets?: Array<{ id: string; name: string; kind: string }>;
+  readSecret?: (id: string) => Promise<string>;
+}
 export function classifyTask(objective: string, criteria: string[] = [], profile: WorkspaceSettings['codingAgent']['reasoningProfile'] = 'adaptive', repair = false): TaskProfile {
   const broad = /\b(debug|bug|dependency|package|media|image|animation|video|migrat|architect|reference|refactor|feature|redesign|multiple files?|across)\b/i.test(objective);
   const localized = /\b(change|replace|rename|set|update|make|color|colour|text|size|spacing|style|config)\b/i.test(objective);
@@ -89,8 +116,9 @@ export class CodingAgent {
 
   beginTask() { this.previousInteractionId = ''; }
 
-  async perform(taskId: string, prompt: string, cancelled: () => boolean, settings: WorkspaceSettings, canvasImage?: string, referenceWorkspaceIds: string[] = [], options: { objective?: string; criteria?: string[]; repair?: boolean; todo?: (name: string, args: any) => Promise<any>; requireTodos?: boolean; hasTodos?: () => boolean } = {}) {
+  async perform(taskId: string, prompt: string, cancelled: () => boolean, settings: WorkspaceSettings, canvasImage?: string, referenceWorkspaceIds: string[] = [], options: { objective?: string; criteria?: string[]; repair?: boolean; todo?: (name: string, args: any) => Promise<any>; requireTodos?: boolean; hasTodos?: () => boolean; agent?: AgentRuntimeProfile } = {}) {
     if (!this.client) throw new Error('GEMINI_API_KEY is not configured on the server.');
+    if (options.agent?.modelReadableSecrets?.length) return this.performStateless(taskId, prompt, cancelled, settings, canvasImage, referenceWorkspaceIds, options);
     let input: any = canvasImage
       ? [{ type: 'text', text: prompt }, { type: 'image', data: canvasImage, mime_type: 'image/jpeg' }]
       : prompt;
@@ -105,11 +133,11 @@ export class CodingAgent {
       let interactionText = '';
       performance.interactionCount++;
       const modelStarted = Date.now(); const stream = await (this.client as any).interactions.create({
-        model: config.coderModel,
+        model: options.agent?.modelId || config.coderModel,
         input,
         ...(this.previousInteractionId ? { previous_interaction_id: this.previousInteractionId } : {}),
-        system_instruction: systemFor(settings),
-        tools: toolsFor(settings, referenceWorkspaceIds.length > 0),
+        system_instruction: systemFor(settings, options.agent),
+        tools: toolsFor(settings, referenceWorkspaceIds.length > 0, options.agent),
         generation_config: { thinking_level: profile.thinkingLevel, thinking_summaries: profile.summaries ? 'auto' : 'none' },
         store: true,
         stream: true,
@@ -162,6 +190,7 @@ export class CodingAgent {
       }
       const toolsStarted = Date.now(); const values = await executeCalls(parsed, async (item) => {
         try {
+          assertToolPermission(options.agent, item.call.name, item.args);
           if (item.call.name === 'create_todo_list' || item.call.name === 'update_todo_list') {
             if (!options.todo) throw new Error('Todo tracking is unavailable for this task.');
             return await options.todo(item.call.name, item.args);
@@ -183,6 +212,59 @@ export class CodingAgent {
     }
     throw new Error('Coding agent exceeded the 60-step tool limit.');
   }
+
+  private async performStateless(taskId: string, prompt: string, cancelled: () => boolean, settings: WorkspaceSettings, canvasImage: string | undefined, referenceWorkspaceIds: string[], options: { objective?: string; criteria?: string[]; repair?: boolean; todo?: (name: string, args: any) => Promise<any>; requireTodos?: boolean; hasTodos?: () => boolean; agent?: AgentRuntimeProfile }) {
+    const agent = options.agent!; const profile = classifyTask(options.objective || prompt, options.criteria, settings.codingAgent.reasoningProfile, options.repair);
+    const content: any[] = [{ type: 'text', text: prompt }]; if (canvasImage) content.push({ type: 'image', data: canvasImage, mime_type: 'image/jpeg' });
+    const history: any[] = [{ type: 'user_input', content }]; const disclosed: string[] = [];
+    const performance: AgentPerformance = { interactionCount: 0, toolCount: 0, callsByTool: {}, tokens: { input: 0, output: 0, thought: 0, cached: 0 }, modelMs: 0, toolMs: 0 };
+    const secretTool = tool('read_secret', 'Read one explicitly authorized model-readable credential on demand. Use only when the assignment requires it.', { secretId: stringProp('Authorized secret ID') }, ['secretId']);
+    for (let iteration = 0; iteration < 60; iteration++) {
+      if (cancelled()) throw new Error('Task cancelled'); const modelStarted = Date.now(); performance.interactionCount++;
+      const interaction: any = await (this.client as any).interactions.create({
+        model: agent.modelId || config.coderModel, input: history, system_instruction: systemFor(settings, agent),
+        tools: [...toolsFor(settings, referenceWorkspaceIds.length > 0, agent), secretTool],
+        generation_config: { thinking_level: profile.thinkingLevel, thinking_summaries: profile.summaries ? 'auto' : 'none' }, store: false,
+      }, { timeout: config.taskTimeoutMs });
+      performance.modelMs += Date.now() - modelStarted; collectUsage(performance.tokens, interaction.usage || interaction.usage_metadata);
+      const steps = Array.isArray(interaction.steps) ? interaction.steps : []; history.push(...steps);
+      for (const step of steps) {
+        if (step.type === 'thought' && profile.summaries) for (const part of step.summary || []) if (part.text) await this.activity.emit(taskId, 'thought_summary', 'coding', redactText(part.text, disclosed));
+      }
+      const calls = steps.filter((step: any) => step.type === 'function_call');
+      if (!calls.length) {
+        const summary = steps.filter((step: any) => step.type === 'model_output').flatMap((step: any) => step.content || []).map((part: any) => part.text || '').join('').trim();
+        if (summary) await this.activity.emit(taskId, 'model_output', 'coding', redactText(summary, disclosed));
+        return { summary: redactText(summary, disclosed), performance };
+      }
+      const toolsStarted = Date.now(); const results: any[] = [];
+      for (const call of calls) {
+        const args = typeof call.arguments === 'string' ? JSON.parse(call.arguments || '{}') : call.arguments || {};
+        performance.toolCount++; performance.callsByTool[call.name] = (performance.callsByTool[call.name] || 0) + 1;
+        try {
+          let value: any;
+          if (call.name === 'read_secret') {
+            const secretId = String(args.secretId || ''); const authorized = agent.modelReadableSecrets!.find((secret) => secret.id === secretId);
+            if (!authorized || !agent.readSecret) throw new Error('That secret is not authorized for this agent.');
+            value = await agent.readSecret(secretId); disclosed.push(value);
+          } else if (call.name === 'create_todo_list' || call.name === 'update_todo_list') {
+            assertToolPermission(agent, call.name, args);
+            if (!options.todo) throw new Error('Todo tracking is unavailable for this task.'); value = await options.todo(call.name, args);
+          } else {
+            if (options.requireTodos && isMutation(call.name) && !options.hasTodos?.()) throw new Error('Create the approved plan todo list before the first workspace mutation.');
+            assertToolPermission(agent, call.name, args);
+            value = await this.tools.execute(taskId, call.name, args, cancelled, settings.codingAgent, referenceWorkspaceIds, 'coding', disclosed);
+          }
+          results.push({ type: 'function_result', name: call.name, call_id: call.id, result: [{ type: 'text', text: String(value && typeof value === 'object' ? JSON.stringify({ ...value, screenshotBase64: undefined }) : value) }] });
+        } catch (error) {
+          const message = redactText((error as Error).message, disclosed); if (call.name !== 'read_secret') await this.activity.emit(taskId, 'error', 'coding', `${call.name}: ${message}`);
+          results.push({ type: 'function_result', name: call.name, call_id: call.id, result: [{ type: 'text', text: JSON.stringify({ ok: false, error: message }) }] });
+        }
+      }
+      performance.toolMs += Date.now() - toolsStarted; history.push(...results);
+    }
+    throw new Error('Coding agent exceeded the 60-step tool limit.');
+  }
 }
 
 function tool(name: string, description: string, properties: Record<string, any>, required: string[] = []) { return { type: 'function', name, description, parameters: { type: 'object', properties, ...(required.length ? { required } : {}) } }; }
@@ -190,17 +272,28 @@ function stringProp(description: string) { return { type: 'string', description 
 function numberProp(description: string) { return { type: 'number', description }; }
 function arrayProp(description: string) { return { type: 'array', description, items: { type: 'string' } }; }
 
-function toolsFor(settings: WorkspaceSettings, references: boolean) {
-  return TOOLS.filter((item) => {
-    if (settings.codingAgent.dependencies === 'existing-only' && item.name === 'install_dependencies') return false;
-    if (!settings.codingAgent.mediaGeneration && item.name === 'delegate_media_task') return false;
-    if (settings.codingAgent.validation !== 'standard' && item.name === 'inspect_preview') return false;
-    if (!references && item.name.includes('reference_')) return false;
-    return true;
+export function toolsFor(settings: WorkspaceSettings, references: boolean, agent?: AgentRuntimeProfile) {
+  return TOOL_BROKER.compile({ stage: 'coder', grantedToolIds: agent?.enabledToolIds }).flatMap((item) => {
+    if (item.name === 'delegate_media_task' && !settings.codingAgent.mediaGeneration) return [];
+    if (settings.codingAgent.dependencies === 'existing-only' && item.name === 'install_dependencies') return [];
+    if (settings.codingAgent.validation !== 'standard' && item.name === 'inspect_preview') return [];
+    if (!references && item.name.includes('reference_')) return [];
+    return [item];
   });
 }
 
-function systemFor(settings: WorkspaceSettings) {
+function allowedMediaKinds(agent?: AgentRuntimeProfile): MediaJobKind[] {
+  const all = Object.values(MEDIA_TOOL_KINDS);
+  if (agent?.enabledToolIds === undefined || agent.enabledToolIds.includes('delegate_media_task')) return all;
+  const grants = new Set(agent.enabledToolIds);
+  return Object.entries(MEDIA_TOOL_KINDS).flatMap(([id, kind]) => grants.has(id) ? [kind] : []);
+}
+
+export function assertToolPermission(agent: AgentRuntimeProfile | undefined, name: string, args: any) {
+  TOOL_BROKER.authorize({ stage: 'coder', grantedToolIds: agent?.enabledToolIds }, name, args);
+}
+
+function systemFor(settings: WorkspaceSettings, agent?: AgentRuntimeProfile) {
   const mode = settings.mode === 'canvas'
     ? 'Canvas mode is strict for all new visible work. Draw UI, text, generated media, and animation as layers in one primary HTML5 canvas marked data-cowork-canvas-primary. Do not add visible DOM overlays. Expose window.coworkCanvas with getPrimaryCanvas(), hitTest({x,y}), and getLayer(id); layer bounds use canvas backing-store coordinates, layer IDs are stable, and dispatch cowork:canvas-adapter-ready after registration. DOM is allowed only for the canvas host and nonvisual accessibility support.'
     : settings.mode === 'dom'
@@ -208,10 +301,11 @@ function systemFor(settings: WorkspaceSettings) {
       : 'Mixed mode is active. Use semantic DOM for ordinary layout, text, forms, and controls; use HTML5 canvas for spatial or frame-driven content. Any canvas layers must use a data-cowork-canvas-primary canvas and the window.coworkCanvas adapter contract with stable layer IDs.';
   const dependencies = settings.codingAgent.dependencies === 'existing-only' ? 'Do not add, remove, or change package dependencies.' : 'New dependencies are allowed when materially useful.';
   const media = settings.codingAgent.mediaGeneration
-    ? 'Media generation is enabled. Delegate requested generated media to the Media Agent with delegate_media_task.'
+    ? 'Media generation is enabled. Delegate explicitly requested new media assets to the Media Agent with delegate_media_task; never treat a workspace canvas change as media generation.'
     : 'Do not generate new images or animations; reuse existing assets.';
   const validation = `The independent validator owns routine verification in ${settings.codingAgent.validation} mode. Do not run tests, builds, linters, typechecks, or final preview inspection.`;
-  return `${BASE_SYSTEM}\n\nActive workspace settings:\n- ${mode}\n- ${dependencies}\n- ${media}\n- ${validation}`;
+  const custom = agent?.instructions?.trim() ? `\n\nConfigured worker identity: ${agent.name}\nAdditional instructions:\n${agent.instructions.trim()}` : '';
+  return `${BASE_SYSTEM}\n\nActive workspace settings:\n- ${mode}\n- ${dependencies}\n- ${media}\n- ${validation}${custom}`;
 }
 
 const READ_ONLY = new Set(['locate_code', 'read_files', 'list_reference_files', 'read_reference_file', 'search_reference_files']);
@@ -232,3 +326,4 @@ function collectUsage(target: AgentPerformance['tokens'], usage: any) {
   target.thought = Math.max(target.thought, Number(usage.thought_tokens ?? usage.thoughts_token_count ?? usage.thoughtsTokenCount ?? 0));
   target.cached = Math.max(target.cached, Number(usage.cached_tokens ?? usage.cached_content_token_count ?? usage.cachedContentTokenCount ?? 0));
 }
+function redactText(value: string, secrets: readonly string[]) { return secrets.filter(Boolean).reduce((text, secret) => text.split(secret).join('[REDACTED]'), String(value)); }
