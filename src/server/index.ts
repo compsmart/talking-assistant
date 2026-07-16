@@ -174,6 +174,16 @@ app.post('/api/workspace/assets/images', async (request, response) => route(resp
   }, () => false, settings.get().codingAgent));
 }));
 app.post('/api/media-jobs', (request, response) => routeStatus(response, 202, () => mediaJobs.create(request.body as MediaJobRequest)));
+app.post('/api/media-tools/remove-background', (request, response) => route(response, () => changes.transaction('media background removal', () => imageProcessing.removeBackground(request.body), { source: 'workspace', paths: [String(request.body?.sourcePath || '')] })));
+app.post('/api/media-tools/extract-regions', (request, response) => route(response, () => changes.transaction('media region extraction', () => imageProcessing.extractRegions(request.body), { source: 'workspace', paths: [String(request.body?.sourcePath || '')] })));
+app.post('/api/media-tools/run-script', (request, response) => route(response, () => changes.transaction('media script execution', async () => {
+  const before = await tools.manifest();
+  const result = await tools.execute(`media-script-${randomUUID()}`, 'run_node_script', request.body, () => false, settings.get().codingAgent, [], 'media');
+  const changedFiles = tools.changed(before, await tools.manifest());
+  const invalid = changedFiles.filter((file) => !/^(?:assets\/(?:generated|processed)\/)/.test(file.path));
+  if (invalid.length) throw statusError(`Media scripts may write only beneath assets/generated or assets/processed. Rejected: ${invalid.map((file) => file.path).join(', ')}`, 403);
+  return { ok: true, result, outputs: changedFiles };
+}, { source: 'workspace', paths: [String(request.body?.script || '')] })));
 app.get('/api/media-jobs', (_request, response) => response.json(mediaJobs.list()));
 app.get('/api/media-jobs/:id', (request, response) => route(response, () => Promise.resolve(mediaJobs.get(request.params.id))));
 app.post('/api/media-jobs/:id/cancel', (request, response) => { try { response.status(mediaJobs.cancel(request.params.id) ? 202 : 409).json({ ok: true }); } catch (error) { response.status((error as any).status || 400).json({ error: (error as Error).message }); } });

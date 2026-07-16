@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { assertToolPermission, classifyTask, CODING_TOOL_DEFINITIONS, CODING_TOOL_NAMES, executeCalls, toolsFor } from './CodingAgent.js';
+import { assertToolPermission, classifyTask, CODING_AGENT_SYSTEM, CODING_TOOL_DEFINITIONS, CODING_TOOL_NAMES, executeCalls, toolsFor } from './CodingAgent.js';
 
 describe('adaptive coding profile', () => {
   it('offers deterministic image processing alongside generation', () => {
-    expect(CODING_TOOL_NAMES).toEqual(expect.arrayContaining(['delegate_media_task', 'remove_image_background', 'extract_image_regions']));
+    expect(CODING_TOOL_NAMES).toEqual(expect.arrayContaining(['delegate_media_task', 'remove_image_background', 'extract_image_regions', 'run_node_script']));
     expect(CODING_TOOL_NAMES).not.toEqual(expect.arrayContaining(['generate_image', 'generate_animation']));
   });
   it('routes generated animation through image-to-video frame controls instead of coded substitutes', () => {
@@ -19,6 +19,11 @@ describe('adaptive coding profile', () => {
     const media = CODING_TOOL_DEFINITIONS.find((tool) => tool.name === 'delegate_media_task');
     expect(media?.description).toMatch(/explicit request for a new image/i);
     expect(media?.description).toMatch(/never use it to modify a workspace HTML5 canvas/i);
+  });
+  it('does not treat standalone media creation as permission to edit or place it', () => {
+    expect(CODING_AGENT_SYSTEM).toMatch(/standalone media request/i);
+    expect(CODING_AGENT_SYSTEM).toMatch(/do not edit application files/i);
+    expect(CODING_AGENT_SYSTEM).toMatch(/only when the user explicitly asked to place or use the asset/i);
   });
   it('narrows and enforces delegated media kinds from scoped registry grants', () => {
     const settings = { codingAgent: { mediaGeneration: true, dependencies: 'allow', validation: 'standard' } } as any;

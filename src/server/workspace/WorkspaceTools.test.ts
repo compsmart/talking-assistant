@@ -57,6 +57,21 @@ describe('WorkspaceTools boundary', () => {
     await expect(subject().execute('test', 'run_command', { command: 'npm test' }, () => false, policy)).rejects.toThrow(/skips coding-agent verification/);
   });
 
+  it('runs only scripts-folder Node utilities with literal arguments and read-only role mounts', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cowork-node-script-')); await mkdir(join(root, 'scripts'));
+    await writeFile(join(root, 'scripts', 'inspect.mjs'), 'console.log(process.argv.slice(2))');
+    const runInSandbox = vi.fn().mockResolvedValue({ code: 0, stdout: 'ok', stderr: '' });
+    const context = { id: 'temp', name: 'Temp', draftDir: root }; const activity = { emit: vi.fn().mockResolvedValue(undefined) };
+    const tools = new WorkspaceTools({ runInSandbox } as any, activity as any, { active: () => context, get: () => context } as any);
+    try {
+      await expect(tools.execute('test', 'run_node_script', { script: 'scripts/inspect.mjs', args: ['a b', "x'y", '; rm -rf /'] }, () => false, undefined, [], 'planning')).resolves.toMatchObject({ code: 0 });
+      expect(runInSandbox).toHaveBeenCalledWith(expect.stringContaining("'scripts/inspect.mjs'"), false, 180_000, root, true, true);
+      const command = runInSandbox.mock.calls[0][0]; expect(command).toContain("'a b'"); expect(command).toContain("'x'\"'\"'y'"); expect(command).toContain("'; rm -rf /'");
+      await expect(tools.execute('test', 'run_node_script', { script: '../outside.mjs' })).rejects.toThrow(/beneath scripts/i);
+      await expect(tools.execute('test', 'run_node_script', { script: 'scripts/inspect.py' })).rejects.toThrow(/beneath scripts/i);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it('runs bounded utility operations without workspace mutation', async () => {
     await expect(subject().execute('test', 'calculate', { expression: '2 * (3 + 4)^2' })).resolves.toEqual({ value: 98 });
     await expect(subject().execute('test', 'calculate', { expression: 'process.exit()' })).rejects.toThrow(/unsupported/);

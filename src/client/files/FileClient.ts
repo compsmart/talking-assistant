@@ -25,7 +25,7 @@ export function commitWorkspace(actions: string[] = []) { return fetch('/api/wor
 export function generateImageAsset(request: ImageAssetGenerationRequest) { return fetch('/api/workspace/assets/images', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request) }).then((response) => json<ImageAssetGenerationResult>(response)); }
 export interface UploadOptions {
   destination?: string;
-  accept?: 'media' | 'image';
+  accept?: 'media' | 'image' | 'file';
   onProgress?: (progress: number) => void;
 }
 

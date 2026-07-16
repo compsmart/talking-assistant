@@ -1,7 +1,7 @@
 import type { AgentStage, AgentToolCategoryDescriptor, AgentToolDescriptor } from '../../shared/protocol.js';
 
 const ALL_STAGES: AgentStage[] = ['planner', 'researcher', 'coder', 'reviewer', 'resolver', 'media'];
-const READ_STAGES: AgentStage[] = ['planner', 'researcher', 'coder', 'reviewer', 'resolver'];
+const READ_STAGES: AgentStage[] = ['planner', 'researcher', 'coder', 'reviewer', 'resolver', 'media'];
 
 export const TOOL_CATEGORIES: AgentToolCategoryDescriptor[] = [
   category('project-files', 'Project Files', 'Inspect and change files in the active workspace.', 10),
@@ -62,8 +62,13 @@ const BUILTIN_TOOLS: AgentToolDescriptor[] = [
   mediaDescriptor('media.generate_sound_effect', 'Generate sound effect', 'Generate a sound effect through a persistent Media Agent job.', 'sound-effect', {
     prompt: textInput('Detailed sound-effect brief'), name: textInput('Stable output filename stem'), durationSeconds: numberInput('Requested duration'),
   }),
-  descriptor('remove_image_background', 'Remove image background', 'Process a workspace image.', 'media', ['write', 'execute'], ['coder', 'media']),
-  descriptor('extract_image_regions', 'Extract image regions', 'Split foreground regions into assets.', 'media', ['write', 'execute'], ['coder', 'media']),
+  descriptor('remove_image_background', 'Remove image background', 'Process a workspace image.', 'media', ['write', 'execute'], ['media']),
+  descriptor('extract_image_regions', 'Extract image regions', 'Split foreground regions into assets.', 'media', ['write', 'execute'], ['media']),
+  {
+    ...descriptor('run_node_script', 'Run Node script', 'Run a checked-in Node.js utility beneath scripts/ in the isolated workspace sandbox.', 'execution-quality', ['execute'], ALL_STAGES),
+    locked: true,
+    inputSchema: { type: 'object', properties: { script: textInput('Workspace-relative scripts/*.js, *.mjs, or *.cjs path'), args: stringListInput('Literal command arguments') }, required: ['script'] },
+  },
 ];
 
 export interface EffectiveToolRequest {

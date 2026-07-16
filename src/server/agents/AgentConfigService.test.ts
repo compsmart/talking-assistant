@@ -17,6 +17,7 @@ describe('agent configuration', () => {
   it('seeds protected built-in profiles and persists custom profiles atomically', async () => {
     const { root, value } = await service(); const initial = value.get();
     expect(initial.profiles.map((item) => item.id)).toContain('builtin-coder');
+    expect(initial.profiles.every((item) => item.toolIds.includes('run_node_script'))).toBe(true);
     const updated = await value.saveProfile({
       name: 'Accessibility specialist', description: 'Reviews accessible UI', enabled: true, stages: ['reviewer'],
       capabilities: ['accessibility'], model: 'gemini-test', instructions: 'Audit WCAG concerns.', toolIds: ['read_files'],
@@ -62,7 +63,7 @@ describe('agent configuration', () => {
     expect(coder.toolIds).not.toContain('delegate_media_task');
   });
 
-  it('broadens only built-ins during the versioned catalog migration', async () => {
+  it('preserves custom grants while adding the locked Node-script capability to every agent', async () => {
     const { root, value } = await service(); const stored: any = value.get(); stored.schemaVersion = 1;
     const custom = { ...structuredClone(stored.profiles[0]), id: 'custom-agent', kind: 'custom', toolIds: ['read_files'] };
     stored.profiles.push(custom); stored.overrides.push({ agentId: 'builtin-planner', workspaceId: 'workspace-one', toolIds: ['read_files'], revision: 1, updatedAt: new Date().toISOString() });
@@ -71,8 +72,18 @@ describe('agent configuration', () => {
     const migrated = await new AgentConfigService(root).initialize();
     expect(migrated.schemaVersion).toBe(2);
     expect(migrated.profiles.find((profile) => profile.id === 'builtin-planner')?.toolIds).toContain('web.search');
-    expect(migrated.profiles.find((profile) => profile.id === 'custom-agent')?.toolIds).toEqual(['read_files']);
-    expect(migrated.overrides[0].toolIds).toEqual(['read_files']);
+    expect(migrated.profiles.find((profile) => profile.id === 'custom-agent')?.toolIds).toEqual(['read_files', 'run_node_script']);
+    expect(migrated.overrides[0].toolIds).toEqual(['read_files', 'run_node_script']);
+  });
+
+  it('removes deterministic image processors from non-Media profiles during migration', async () => {
+    const { root, value } = await service(); const stored = value.get();
+    const coder = stored.profiles.find((profile) => profile.id === 'builtin-coder')!;
+    coder.toolIds.push('remove_image_background', 'extract_image_regions');
+    await writeFile(join(root, 'config.json'), `${JSON.stringify(stored, null, 2)}\n`);
+    const migrated = await new AgentConfigService(root).initialize();
+    expect(migrated.profiles.find((profile) => profile.id === 'builtin-coder')?.toolIds).not.toEqual(expect.arrayContaining(['remove_image_background', 'extract_image_regions']));
+    expect(migrated.profiles.find((profile) => profile.id === 'builtin-media')?.toolIds).toEqual(expect.arrayContaining(['remove_image_background', 'extract_image_regions']));
   });
 });
 

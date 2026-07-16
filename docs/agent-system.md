@@ -54,6 +54,8 @@ The catalog groups tools by capability rather than granting an unrestricted shel
 | Deterministic processing | Background removal and region extraction |
 | Safe utilities | Bounded calculation, date/time, regex, and content hashing |
 
+Every built-in and custom agent can also run checked-in user Node utilities beneath `scripts/`; this locked baseline capability cannot be removed by a workspace override. It is not a general shell grant: the runner accepts only workspace-relative `.js`, `.mjs`, or `.cjs` files under that directory, passes arguments literally, disables networking, drops Linux capabilities, prevents privilege escalation, uses a read-only container filesystem, enforces container CPU/memory/process/time/output limits, and does not mount host paths, the Docker socket, or credentials. Planner, researcher, and reviewer executions additionally receive a read-only workspace mount. Live media-script publication rejects changes outside `assets/generated` and `assets/processed`.
+
 An effective tool set is the intersection of the tool catalog, profile grants, workspace overrides, stage support, workspace settings, and request-scoped reference access. Adding a tool to a profile does not bypass the broker or workspace policy.
 
 ## Skills, contexts, and workspace overrides
@@ -84,7 +86,7 @@ Planning starts only when explicitly requested or when a plan-first strategy is 
 
 ### Media
 
-Media jobs are durable, cancellable, and revisioned. A coding agent receives stable placeholder paths immediately and can continue implementation while the Media Agent generates and validates the requested asset. Deterministic image-processing tools do not require generative media to be enabled.
+Media jobs are durable, cancellable, and revisioned. Standalone media generation and reference-guided image manipulation route directly to the Media Agent and publish only the requested asset. They do not authorize a coding task, an application edit, opening the Image Editor, or placing the result into a page or HTML5 canvas. When an implementation request explicitly includes both asset creation and placement, a coding agent may receive stable placeholder paths and integrate those exact paths while the Media Agent generates and validates the asset. Deterministic image-processing tools do not require generative media to be enabled.
 
 ## Concurrency, continuation, and retries
 

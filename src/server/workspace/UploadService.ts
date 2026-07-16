@@ -18,7 +18,7 @@ const ALLOWED_AUDIO_VIDEO = new Set(['video/mp4', 'video/webm', 'video/quicktime
 const IGNORED_DIRECTORIES = new Set(['node_modules', '.git', 'dist']);
 
 interface PendingUpload { temporary: string; originalName: string; mimeType?: string }
-type UploadAccept = 'media' | 'image';
+type UploadAccept = 'media' | 'image' | 'file';
 
 export class UploadService {
   constructor(private readonly registry: WorkspaceRegistry) {}
@@ -37,7 +37,7 @@ export class UploadService {
         });
         parser.on('file', (_field, stream, info) => {
           count++; if (count > MAX_FILES) { stream.resume(); return; }
-          const temporary = join(job, `${count}.upload`); pending.push({ temporary, originalName: info.filename || `upload-${count}` });
+          const temporary = join(job, `${count}.upload`); pending.push({ temporary, originalName: info.filename || `upload-${count}`, mimeType: info.mimeType });
           let truncated = false; stream.on('limit', () => { truncated = true; });
           writes.push(pipeline(stream, createWriteStream(temporary)).then(() => { if (truncated) throw statusError(`${info.filename} exceeds the 100 MB upload limit.`, 413); }));
         });
@@ -50,7 +50,7 @@ export class UploadService {
       const accept = parseAccept(acceptInput);
       for (const item of pending) {
         item.mimeType = await detectMimeType(item);
-        if (!isAllowedMedia(item.mimeType) || (accept === 'image' && !item.mimeType.startsWith('image/'))) {
+        if (accept !== 'file' && (!isAllowedMedia(item.mimeType) || (accept === 'image' && !item.mimeType.startsWith('image/')))) {
           throw statusError(accept === 'image'
             ? `${item.originalName} is not a supported image file.`
             : `${item.originalName} is not a supported image, video, or audio file.`, 415);
@@ -58,17 +58,17 @@ export class UploadService {
       }
       const requestedDirectory = destinationInput === undefined ? undefined : await uploadDirectory(context.draftDir, destinationInput);
       const records: AssetRecord[] = [];
-      for (const item of pending) records.push(await this.process(item, context.draftDir, requestedDirectory));
+      for (const item of pending) records.push(await this.process(item, context.draftDir, requestedDirectory, accept === 'file'));
       await this.updateManifest(records, context.draftDir);
       return records;
     } finally { await rm(job, { recursive: true, force: true }); }
   }
 
-  private async process(item: PendingUpload, draftDir: string, requestedDirectory?: string): Promise<AssetRecord> {
+  private async process(item: PendingUpload, draftDir: string, requestedDirectory?: string, preserveOriginal = false): Promise<AssetRecord> {
     let mimeType = item.mimeType!;
-    const raster = shouldNormalizeImage(mimeType);
+    const raster = !preserveOriginal && shouldNormalizeImage(mimeType);
     const directory = requestedDirectory || defaultUploadDirectory(draftDir, mimeType); await mkdir(directory, { recursive: true });
-    const extension = raster ? '.webp' : normalizedExtension(mimeType, item.originalName); const stem = slug(item.originalName);
+    const extension = raster ? '.webp' : preserveOriginal ? extname(item.originalName).toLowerCase() : normalizedExtension(mimeType, item.originalName); const stem = slug(item.originalName);
     let filename = `${stem}${extension}`; let index = 2; while (await exists(join(directory, filename))) filename = `${stem}-${index++}${extension}`;
     const destination = join(directory, filename);
     if (raster) {
@@ -92,7 +92,7 @@ async function detectMimeType(item: PendingUpload) {
   if (!mimeType && extname(item.originalName).toLowerCase() === '.svg') {
     const prefix = (await readFile(item.temporary, 'utf8')).slice(0, 2000).toLowerCase(); if (prefix.includes('<svg')) mimeType = 'image/svg+xml';
   }
-  return mimeType;
+  return mimeType || item.mimeType || 'application/octet-stream';
 }
 
 export function isAllowedMedia(mimeType: string) { return mimeType.startsWith('image/') || ALLOWED_AUDIO_VIDEO.has(mimeType); }
@@ -105,7 +105,8 @@ export function defaultUploadDirectory(draftDir: string, mimeType: string) {
 export function parseAccept(value?: string): UploadAccept {
   if (value === undefined || value === '' || value === 'media') return 'media';
   if (value === 'image') return 'image';
-  throw statusError('Upload accept must be media or image.', 400);
+  if (value === 'file') return 'file';
+  throw statusError('Upload accept must be media, image, or file.', 400);
 }
 export async function uploadDirectory(draftDir: string, input: string) {
   const path = input.trim() || '.';

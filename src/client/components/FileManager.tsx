@@ -24,7 +24,7 @@ interface Props {
 }
 
 type Dialog = 'unsaved' | null;
-type TreeRoot = 'assets' | 'uploads' | 'project';
+type TreeRoot = 'project';
 type InlineEdit = ({ treeRoot: TreeRoot } & ({ kind: 'create'; directory: string } | { kind: 'rename'; path: string; directory: string }));
 type FileMenu = { node: WorkspaceFileNode; treeRoot: TreeRoot; left: number; top: number };
 const WORKSPACE_FILE_MIME = 'application/x-cowork-workspace-file';
@@ -51,6 +51,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
   const [recentPath, setRecentPath] = useState<string>();
   const [fileMenu, setFileMenu] = useState<FileMenu>();
   const [sortOpen, setSortOpen] = useState(false);
+  const [managerDropActive, setManagerDropActive] = useState(false);
   const [view, setView] = useState<FileManagerViewPreferences>(() => parseFileManagerView(localStorage.getItem(VIEW_STORAGE_KEY)));
   const actionLog = useRef<string[]>([]);
   const commitQueue = useRef<Promise<void>>(Promise.resolve());
@@ -214,13 +215,27 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
   const requestClose = async () => { if (dirty) { setDialog('unsaved'); return; } await finishClose(); };
   const saveAndClose = async () => { if (!await save()) return; await finishClose(); };
   const toggleSelected = (path: string) => onSelectedPaths(selectedPaths.includes(path) ? selectedPaths.filter((item) => item !== path) : [...selectedPaths, path]);
-  const uploadInto = useCallback(async (files: File[], destination: string) => { try { const result = await onUpload(files, destination); void logAndCommit(result.value.map((file) => `user uploaded file ${file.path}`)); } catch (error) { onError((error as Error).message); } }, [logAndCommit, onError, onUpload]);
+  const uploadInto = useCallback(async (files: File[], destination: string) => {
+    if (isPlansDirectory(destination)) { onError('The plans directory is managed automatically. Choose another folder.'); return; }
+    try {
+      const result = await onUpload(files, destination); void logAndCommit(result.value.map((file) => `user uploaded file ${file.path}`));
+      setLocalRefreshKey((value) => value + 1); if (result.value[0]) setRecentPath(result.value[0].path);
+    } catch (error) { onError((error as Error).message); }
+  }, [logAndCommit, onError, onUpload]);
   const extensions = useMemo(() => editorExtensions(active?.path || ''), [active?.path]);
   const treeRefreshKey = refreshKey + localRefreshKey;
 
   return <>
     <FloatingWindow id="file-manager" title="Workspace Files" initial={{ x: 26, y: 32, width: 820, height: 590 }} minWidth={560} minHeight={360} className="file-manager-window" onClose={() => void requestClose()}>
-      <div className="file-manager">
+      <div
+        className={`file-manager ${managerDropActive ? 'drop-active' : ''}`}
+        onDragEnter={(event) => { if (!hasExternalFiles(event)) return; if (isDirectoryDropTarget(event.target)) { setManagerDropActive(false); return; } event.preventDefault(); setManagerDropActive(true); }}
+        onDragOver={(event) => { if (!hasExternalFiles(event)) return; if (isDirectoryDropTarget(event.target)) { setManagerDropActive(false); return; } event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setManagerDropActive(true); }}
+        onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setManagerDropActive(false); }}
+        onDropCapture={() => setManagerDropActive(false)}
+        onDrop={(event) => { if (!hasExternalFiles(event)) return; event.preventDefault(); event.stopPropagation(); const files = Array.from(event.dataTransfer.files); if (files.length) void uploadInto(files, currentDirectory); }}
+      >
+        {managerDropActive && <div className="file-manager-drop-hint">Drop into <strong>{currentDirectory === '.' ? 'Project' : currentDirectory}</strong></div>}
         <aside className="file-sidebar">
           <input className="file-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search project…" aria-label="Search project files" />
           <div className="file-toolbar" aria-label="File tools">
@@ -240,7 +255,7 @@ export function FileManager({ focusPath, refreshKey, selectedPaths, onSelectedPa
             const node: WorkspaceFileNode = { name: result.path.split('/').pop() || result.path, path: result.path, kind: 'file', previewKind: previewKindFor(result.path) };
             return <div className={`file-result-item ${active?.path === result.path ? 'active' : ''}`} key={`${result.path}:${result.line}:${index}`}><button className="file-result-open" onClick={() => { setCurrentTreeRoot('project'); void openPath(result.path, node); }}><strong>{result.path}{result.line ? `:${result.line}` : ''}</strong>{result.text && <span>{result.text}</span>}</button><button className="file-row-more" aria-label={`Actions for ${result.path}`} onClick={(event) => openFileMenu(event, node, 'project')}>•••</button></div>;
           })}</div>
-            : <div className="file-tree"><TreeDirectory treeRoot="assets" activeTreeRoot={currentTreeRoot} path="assets/generated" label="Asset Library" selected={selectedPaths} active={active?.path} currentDirectory={currentDirectory} view={view} inlineEdit={inlineEdit} inlineName={inlineName} inlineError={inlineError} inlineBusy={!!mutating} recentPath={recentPath} refreshKey={treeRefreshKey} onOpen={openPath} onToggle={toggleSelected} onSelectDirectory={selectDirectory} onInlineName={setInlineName} onSubmitInline={() => void submitInlineEdit()} onCancelInline={cancelInlineEdit} onMenu={openFileMenu} onDropFiles={uploadInto} optional /><TreeDirectory treeRoot="uploads" activeTreeRoot={currentTreeRoot} path="uploads" label="Uploads" selected={selectedPaths} active={active?.path} currentDirectory={currentDirectory} view={view} inlineEdit={inlineEdit} inlineName={inlineName} inlineError={inlineError} inlineBusy={!!mutating} recentPath={recentPath} refreshKey={treeRefreshKey} onOpen={openPath} onToggle={toggleSelected} onSelectDirectory={selectDirectory} onInlineName={setInlineName} onSubmitInline={() => void submitInlineEdit()} onCancelInline={cancelInlineEdit} onMenu={openFileMenu} onDropFiles={uploadInto} optional /><TreeDirectory treeRoot="project" activeTreeRoot={currentTreeRoot} path="." label="Project" selected={selectedPaths} active={active?.path} currentDirectory={currentDirectory} view={view} inlineEdit={inlineEdit} inlineName={inlineName} inlineError={inlineError} inlineBusy={!!mutating} recentPath={recentPath} refreshKey={treeRefreshKey} onOpen={openPath} onToggle={toggleSelected} onSelectDirectory={selectDirectory} onInlineName={setInlineName} onSubmitInline={() => void submitInlineEdit()} onCancelInline={cancelInlineEdit} onMenu={openFileMenu} onDropFiles={uploadInto} defaultOpen /></div>}
+            : <div className="file-tree"><TreeDirectory treeRoot="project" activeTreeRoot={currentTreeRoot} path="." label="Project" selected={selectedPaths} active={active?.path} currentDirectory={currentDirectory} view={view} inlineEdit={inlineEdit} inlineName={inlineName} inlineError={inlineError} inlineBusy={!!mutating} recentPath={recentPath} refreshKey={treeRefreshKey} onOpen={openPath} onToggle={toggleSelected} onSelectDirectory={selectDirectory} onInlineName={setInlineName} onSubmitInline={() => void submitInlineEdit()} onCancelInline={cancelInlineEdit} onMenu={openFileMenu} onDropFiles={uploadInto} defaultOpen /></div>}
         </aside>
         <section className="file-viewer">
           <header className="file-viewer-header"><span>{active?.path || 'Select a file'}</span>{active && <label><input type="checkbox" checked={selectedPaths.includes(active.path)} onChange={() => toggleSelected(active.path)} /> Agent context</label>}{!!selectedPaths.length && <button className="danger" disabled={operationBusy} onClick={() => void removeSelected()}>{deleting ? 'Deleting…' : `Delete selected (${selectedPaths.length})`}</button>}{document && <button disabled={!dirty || operationBusy} onClick={() => void save()}>{saving ? 'Saving…' : dirty ? 'Save' : 'Saved'}</button>}{isPlan && <button className="proceed" disabled={operationBusy} onClick={() => void proceed()}>Proceed</button>}</header>
@@ -292,6 +307,8 @@ const icons = {
   folder: 'M3 5h7l2 2h9v12H3z', copy: 'M8 8h12v12H8zm-4-4h12v2H6v10H4z', rename: 'm4 17-.5 3.5L7 20l11-11-2.5-2.5zm13-12 2.5 2.5 1-1a1.8 1.8 0 0 0-2.5-2.5z',
 };
 function FileIcon({ path }: { path: string }) { return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={path} /></svg>; }
+function hasExternalFiles(event: React.DragEvent) { return Array.from(event.dataTransfer.types).includes('Files'); }
+function isDirectoryDropTarget(target: EventTarget | null) { return target instanceof Element && !!target.closest('.tree-directory-label'); }
 function previewKindFor(path: string): WorkspaceFileNode['previewKind'] { const extension = path.split('.').pop()?.toLowerCase(); if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(extension || '')) return 'image'; if (['mp4', 'webm', 'mov'].includes(extension || '')) return 'video'; if (['mp3', 'wav', 'ogg'].includes(extension || '')) return 'audio'; if (['woff', 'woff2', 'ttf', 'ico', 'bin', 'zip'].includes(extension || '')) return 'binary'; return 'text'; }
 function iconFor(kind?: WorkspaceFileNode['previewKind']) { return kind === 'image' ? '▧' : kind === 'video' ? '▶' : kind === 'audio' ? '♪' : kind === 'binary' ? '◆' : '·'; }
 function editorExtensions(path: string) { const extension = path.split('.').pop()?.toLowerCase(); if (['js', 'jsx', 'mjs', 'cjs'].includes(extension || '')) return [javascript({ jsx: true })]; if (['ts', 'tsx'].includes(extension || '')) return [javascript({ jsx: extension === 'tsx', typescript: true })]; if (['html', 'htm'].includes(extension || '')) return [html()]; if (extension === 'css') return [css()]; if (extension === 'json') return [json()]; if (['md', 'markdown'].includes(extension || '')) return [markdown()]; return []; }

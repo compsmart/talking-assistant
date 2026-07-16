@@ -32,4 +32,18 @@ describe('agent tool catalog', () => {
     expect(directory.tools.every((tool) => tool.inputSchema?.type === 'object' && tool.outputSchema?.type === 'object')).toBe(true);
     expect(directory.tools.every((tool) => directory.categories.some((category) => category.id === tool.categoryId))).toBe(true);
   });
+
+  it('offers the constrained Node-script runner to every agent stage', () => {
+    const tool = new ToolCatalog().get('run_node_script');
+    expect(tool?.stages).toEqual(expect.arrayContaining(['planner', 'researcher', 'coder', 'reviewer', 'resolver', 'media']));
+    expect(tool?.inputSchema?.required).toEqual(['script']);
+    expect(tool?.risks).not.toContain('network');
+  });
+
+  it('reserves deterministic image processing for the Media stage', () => {
+    const catalog = new ToolCatalog();
+    expect(catalog.get('extract_image_regions')?.stages).toEqual(['media']);
+    expect(catalog.get('remove_image_background')?.stages).toEqual(['media']);
+    expect(catalog.effective({ stage: 'coder', profileToolIds: ['extract_image_regions', 'remove_image_background'] })).toEqual([]);
+  });
 });
