@@ -1,0 +1,51 @@
+{
+  "name": "minimal-gemini-cowork",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "build": "tsc -b && vite build",
+    "start": "tsx src/server/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false",
+    "perf:targeted": "tsx scripts/targeted-edit-benchmark.ts"
+  },
+  "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@google/genai": "latest",
+    "@uiw/react-codemirror": "^4.25.11",
+    "busboy": "^1.6.0",
+    "dotenv": "latest",
+    "express": "latest",
+    "fabric": "^7.4.0",
+    "file-type": "^22.0.1",
+    "http-proxy": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "sharp": "^0.35.3",
+    "ws": "latest"
+  },
+  "devDependencies": {
+    "@types/busboy": "^1.5.4",
+    "@types/express": "latest",
+    "@types/http-proxy": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@types/ws": "latest",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "playwright-core": "latest",
+    "tsx": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "vitest": "latest"
+  }
+}

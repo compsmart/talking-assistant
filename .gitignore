@@ -1,0 +1,13 @@
+/node_modules/
+/dist/
+/.env*
+!/.env.example
+/.cowork/
+/workspace/
+/uploads/
+/coverage/
+/playwright-report/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db

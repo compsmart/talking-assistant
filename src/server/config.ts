@@ -1,0 +1,32 @@
+import 'dotenv/config';
+import { resolve } from 'node:path';
+
+export const config = {
+  root: resolve(process.cwd()),
+  appPort: Number(process.env.APP_PORT || 3301),
+  previewPort: Number(process.env.PREVIEW_PORT || 4174),
+  geminiKey: process.env.GEMINI_API_KEY || '',
+  liveModel: process.env.GEMINI_LIVE_MODEL || 'gemini-3.1-flash-live-preview',
+  coderModel: process.env.GEMINI_CODER_MODEL || 'gemini-3.5-flash',
+  plannerModel: process.env.GEMINI_PLANNER_MODEL || process.env.GEMINI_CODER_MODEL || 'gemini-3.5-flash',
+  imageModel: process.env.GEMINI_IMAGE_MODEL || 'gemini-3.1-flash-image',
+  videoModel: process.env.GEMINI_VIDEO_MODEL || 'veo-3.1-generate-preview',
+  mediaAgentModel: process.env.GEMINI_MEDIA_AGENT_MODEL || process.env.GEMINI_CODER_MODEL || 'gemini-3.5-flash',
+  musicModel: process.env.GEMINI_MUSIC_MODEL || 'lyria-realtime-exp',
+  mediaAnalysisModel: process.env.GEMINI_MEDIA_ANALYSIS_MODEL || 'gemini-3.1-flash-lite-preview',
+  ffmpegPath: process.env.FFMPEG_PATH || 'ffmpeg',
+  mediaTimeoutMs: Number(process.env.MEDIA_GENERATION_TIMEOUT_MS || 900_000),
+  taskTimeoutMs: Number(process.env.TASK_TIMEOUT_MS || 480_000),
+  projectsDir: resolve('workspace/projects'),
+  draftDir: resolve('workspace/draft'),
+  releasesDir: resolve('workspace/releases'),
+  failedDir: resolve('workspace/failed'),
+  stateDir: resolve('.cowork'),
+  workspaceGitDir: resolve('.cowork/workspace-git'),
+  mediaJobsDir: resolve('.cowork/media-jobs'),
+  workspacesStateDir: resolve('.cowork/workspaces'),
+  workspaceCatalogPath: resolve('.cowork/workspaces.json'),
+  dockerfile: resolve('docker/workspace.Dockerfile'),
+  sandboxDockerfile: resolve('docker/sandbox.Dockerfile'),
+  sandboxImage: 'cowork-sandbox:local',
+};
